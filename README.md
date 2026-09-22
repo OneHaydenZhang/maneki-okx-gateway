@@ -105,6 +105,7 @@ facilitator for one that accepts any well-formed authorization.
 | `OKX_DEFAULT_PERSONA` `OKX_DEFAULT_MODEL` `OKX_DEFAULT_INTERVAL_S` `OKX_DEFAULT_MAX_TICKS` `OKX_DEFAULT_CAPITAL_MAX` `OKX_DEFAULT_MAX_LEVERAGE` | agent defaults | navigator / deepseek / 3600 / 24 / 200 / 3 |
 | `XLAYER_ANCHOR_PRIVATE_KEY` | key that pays gas for report anchoring (optional) | — |
 | `OKX_LIVE_AGENTS` | allow `mode: live` agents (still needs link + approvals + confirm) | `0` |
+| `OKX_LIVE_CAPITAL_MAX` / `OKX_LIVE_MAX_LEVERAGE` | ceilings for live agents created from a conversation | `500` / `3` |
 | `MANEKI_DASHBOARD_BASE` | origin of the Maneki web app the authorize link opens | `https://manekiai.io` |
 | `OKX_GATEWAY_DATA` | SQLite dir for accounts/orders | `data/okx_gateway` |
 

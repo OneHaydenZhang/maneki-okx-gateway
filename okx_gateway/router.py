@@ -185,6 +185,7 @@ async def info() -> Dict[str, Any]:
                            "/okx/v1/agents/control", "/okx/v1/authorize", "/okx/v1/account",
                            "/okx/v1/report/get", "/okx/v1/symbols"],
         "live_agents_enabled": s.live_agents,
+        "live_limits": {"capital_max": s.live_capital_max, "max_leverage": s.live_max_leverage},
         "listing": s.public_url("/okx/v1/listing"),
         "anchor": xlayer_anchor.anchor_status(),
         "dev_accept": s.dev_accept,
@@ -310,6 +311,14 @@ async def agents_create(request: Request):
                     "message": "A live agent trades a real Hyperliquid account. Link and authorize your browser wallet "
                                "first: call 'Maneki Live Authorization' and open the link it returns.",
                     "linked": st.get("linked"), "wallet": st.get("wallet"), "authorization": auth_}
+        cap_usd = float(body.get("capital_max") or s.default_capital_max)
+        cap_lev = int(body.get("max_leverage") or s.default_max_leverage)
+        if cap_usd > s.live_capital_max or cap_lev > s.live_max_leverage:
+            return {"status": "limit_exceeded",
+                    "message": (f"Live agents created from OKX AI are capped at ${s.live_capital_max:g} capital and "
+                                f"{s.live_max_leverage}x leverage on this deployment (asked ${cap_usd:g} / {cap_lev}x). "
+                                "Lower the values, or manage larger agents in the Maneki web app."),
+                    "limits": {"capital_max": s.live_capital_max, "max_leverage": s.live_max_leverage}}
         if not body.get("confirm"):
             return {"status": "confirmation_required",
                     "message": "This will start an agent that places REAL orders on Hyperliquid with the linked wallet. "
@@ -425,6 +434,15 @@ async def agents_control(request: Request):
             return _input_required([_field(k, "string", "new value", required=False) for k in allowed],
                                    "update needs at least one of: " + ", ".join(allowed))
     try:
+        if action == "update" and ("capital_max" in payload or "max_leverage" in payload):
+            cur = (await _core().get_agent(_addr(acct), agent_id)).get("agent") or {}
+            if (cur.get("mode") or "live") == "live":
+                s = settings()
+                if float(payload.get("capital_max") or 0) > s.live_capital_max or \
+                        int(payload.get("max_leverage") or 0) > s.live_max_leverage:
+                    return {"status": "limit_exceeded",
+                            "message": f"Live agents are capped at ${s.live_capital_max:g} / {s.live_max_leverage}x here.",
+                            "limits": {"capital_max": s.live_capital_max, "max_leverage": s.live_max_leverage}}
         if action == "update":
             data = await _core().patch_agent(_addr(acct), agent_id, payload)
         else:
@@ -481,6 +499,8 @@ async def authorize(request: Request):
                              "Approve Maneki's API wallet and, if shown, the commission in Settings.",
                              "Come back and call 'Maneki Account' to confirm live_ready=true."],
             "what_moves": "Your Agent Gas moves to the linked wallet's Maneki account; virtual and live agents then share it.",
+            "warning": ("Use a wallet that is NOT already running Maneki agents on manekiai.io: two deployments trading "
+                        "the same Hyperliquid account and symbol would fight over the same position."),
             **_auth_view(st)}
 
 

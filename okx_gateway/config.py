@@ -92,6 +92,9 @@ class Settings:
     # Live (real Hyperliquid) agents through the gateway: off by default. Needs a
     # linked + authorized browser wallet (route A) even when on.
     live_agents: bool = field(default_factory=lambda: _flag("OKX_LIVE_AGENTS"))
+    # Hard ceilings for agents created from a conversation (real money only).
+    live_capital_max: float = field(default_factory=lambda: _float("OKX_LIVE_CAPITAL_MAX", 500.0))
+    live_max_leverage: int = field(default_factory=lambda: _int("OKX_LIVE_MAX_LEVERAGE", 3))
     # Storage
     data_dir: Path = field(default_factory=lambda: Path(_env("OKX_GATEWAY_DATA") or (ROOT / "data" / "okx_gateway")))
 
