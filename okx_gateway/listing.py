@@ -74,7 +74,8 @@ def services() -> List[Dict[str, Any]]:
                 "market data and code-enforced risk limits, simulates fills, and records every reasoning. Never touches an "
                 "exchange. Each decision round costs Agent Gas (18 to 88 depending on model).",
                 "api_key(string, required); symbol(string, required): ticker; persona(string, optional): conservative|"
-                "balanced|navigator|aggressive|extreme; model(string, optional); capital_max(number, optional): USD budget, "
+                "balanced|navigator|aggressive|extreme; mode(string, optional): virtual (default) or live (needs Maneki "
+                "Live Authorization + confirm=true); model(string, optional); capital_max(number, optional): USD budget, "
                 "default 200; max_leverage(integer, optional): default 3; max_ticks(integer, optional): rounds to run, "
                 "default 24; label(string, optional)",
                 "/okx/v1/agents/create", {"api_key": "mk_...", "symbol": "NVDA", "persona": "navigator", "capital_max": 200}),
@@ -85,8 +86,8 @@ def services() -> List[Dict[str, Any]]:
             "fee": "0",
             "endpoint": s.public_url("/okx/v1/agents/status"),
             "serviceDescription": _desc(
-                "Lists your Maneki agents, or for one agent returns status, virtual equity, open position, the latest "
-                "decisions with reasoning, and Gas usage.",
+                "Lists your Maneki agents, or for one agent returns status, virtual equity, open position, trade "
+                "records, the latest decisions with reasoning, and Gas balance.",
                 "api_key(string, required); agent_id(string, optional): one agent's id for details",
                 "/okx/v1/agents/status", {"api_key": "mk_...", "agent_id": "ag_xxx"}),
         },
@@ -96,10 +97,35 @@ def services() -> List[Dict[str, Any]]:
             "fee": "0",
             "endpoint": s.public_url("/okx/v1/agents/control"),
             "serviceDescription": _desc(
-                "Start, stop, extend or close the position of one of your Maneki agents.",
+                "Start, stop, extend, update the strategy parameters of, or close the position of one of your Maneki agents.",
                 "api_key(string, required); agent_id(string, required); action(string, required): start|stop|"
-                "close_position|add_ticks; ticks(integer, optional): rounds to add for add_ticks",
+                "close_position|add_ticks|update; ticks(integer, optional): rounds to add for add_ticks; for update: "
+                "persona, model, interval_s, max_ticks, max_leverage, capital_max, stop_loss_pct, custom_prompt, label "
+                "(any subset)",
                 "/okx/v1/agents/control", {"api_key": "mk_...", "agent_id": "ag_xxx", "action": "stop"}),
+        },
+        {
+            "serviceType": "A2MCP",
+            "serviceName": "Maneki Live Authorization",
+            "fee": "0",
+            "endpoint": s.public_url("/okx/v1/authorize"),
+            "serviceDescription": _desc(
+                "Returns a one-time link the user opens in a browser to connect the wallet whose real Hyperliquid "
+                "account Maneki may trade, sign in (gasless) and approve Maneki's API wallet. Nothing is signed by "
+                "the agent; the link is for the human. Needed only for live agents; virtual agents need no wallet.",
+                "api_key(string, required); force(boolean, optional): mint a new link even if already authorized",
+                "/okx/v1/authorize", {"api_key": "mk_..."}),
+        },
+        {
+            "serviceType": "A2MCP",
+            "serviceName": "Maneki Account Status",
+            "fee": "0",
+            "endpoint": s.public_url("/okx/v1/account"),
+            "serviceDescription": _desc(
+                "Shows your Maneki account: Gas balance, number of agents, linked wallet and its Hyperliquid "
+                "authorization state (live_ready), and what is still missing for live trading.",
+                "api_key(string, required); fresh(boolean, optional): re-check Hyperliquid instead of the cache",
+                "/okx/v1/account", {"api_key": "mk_..."}),
         },
         {
             "serviceType": "A2MCP",

@@ -17,7 +17,7 @@ Constraints on the OKX side (onchainos-skills v4.6.2, plugin-store hyperliquid-p
 
 Ranked options:
 
-1. **Link-back authorization (next)** — the gateway returns an `authorize_url`;
+1. **Link-back authorization (implemented: `/okx/v1/authorize` + `#authorize?code=` in the Maneki web app)** — the gateway returns an `authorize_url`;
    the user signs in a browser wallet exactly as Maneki users do today. Master
    account = browser wallet. Hours of work; no OKX-side dependency.
 2. **Agentic Wallet EOA as master** — user funds the EOA via the official

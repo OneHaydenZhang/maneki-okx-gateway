@@ -97,9 +97,10 @@ async def on_settled(payload: Any, requirements: Any, res: Any) -> None:
         return   # replayed receipt
     if url.endswith(REGISTER_PATH) or REGISTER_PATH in url:
         credits = int(round(usd * 1000)) if usd > 0 else s.register_credits
-        store.mark_paid(payer, tx, credits, usd)
+        acct = store.mark_paid(payer, tx, credits, usd)
+        target = store.effective_address(acct)
         try:
-            await CoreClient().credit(payer, credits, tx, usd, note=f"OKX AI x402 registration/top-up {tx[:12]}")
+            await CoreClient().credit(target, credits, tx, usd, note=f"OKX AI x402 registration/top-up {tx[:12]}")
         except Exception as e:
             print(f"[okx-gateway] core credit failed for {payer} tx={tx}: {e!r}")
     elif url.endswith(REPORT_PATH) or REPORT_PATH in url:

@@ -68,6 +68,11 @@ def _conn() -> sqlite3.Connection:
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA)
+        # additive migration: effective Maneki address (payer until linked)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "address" not in cols:
+            c.execute("ALTER TABLE accounts ADD COLUMN address TEXT DEFAULT ''")
+            c.commit()
         _CONN, _PATH = c, want
     return _CONN
 
@@ -91,6 +96,18 @@ def ensure_account(payer: str) -> Dict[str, Any]:
                   (payer, key, "pending", time.time()))
         c.commit()
         return dict(c.execute("SELECT * FROM accounts WHERE payer=?", (payer,)).fetchone())
+
+
+def effective_address(acct: Dict[str, Any]) -> str:
+    """Where this account's agents/Gas live: the linked wallet, else the payer."""
+    return (acct.get("address") or acct.get("payer") or "").lower()
+
+
+def set_address(payer: str, address: str) -> None:
+    with _LOCK:
+        c = _conn()
+        c.execute("UPDATE accounts SET address=? WHERE payer=?", (address.lower(), payer.lower()))
+        c.commit()
 
 
 def mark_paid(payer: str, txhash: str, credits: int, usd: float) -> Dict[str, Any]:

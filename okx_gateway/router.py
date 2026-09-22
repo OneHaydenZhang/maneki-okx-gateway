@@ -32,7 +32,7 @@ router = APIRouter(prefix="/okx/v1", tags=["okx-gateway"])
 
 _TICKER = re.compile(r"^[A-Za-z0-9.\-]{1,12}$")
 PERSONAS = ("conservative", "balanced", "navigator", "aggressive", "extreme", "custom")
-ACTIONS = ("start", "stop", "close_position", "add_ticks")
+ACTIONS = ("start", "stop", "close_position", "add_ticks", "update")
 
 
 # ---- helpers ---------------------------------------------------------------------
@@ -95,7 +95,28 @@ def _account(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _need_account(body: Dict[str, Any]):
+async def _resolve(acct: Dict[str, Any]) -> Dict[str, Any]:
+    """Refresh the effective Maneki address from the core's link record (route A:
+    once the human claimed the authorize link with a browser wallet, the
+    gateway acts for that wallet). Cheap loopback call; failures keep the
+    last known address."""
+    try:
+        st = await _core().link_status(acct["payer"], light=True)
+        wallet = (st.get("wallet") or "").lower() if st.get("linked") else ""
+        want = wallet or acct["payer"]
+        if want != (acct.get("address") or ""):
+            store.set_address(acct["payer"], want)
+            acct = dict(acct, address=want)
+    except CoreError:
+        pass
+    return acct
+
+
+def _addr(acct: Dict[str, Any]) -> str:
+    return store.effective_address(acct)
+
+
+async def _need_account(body: Dict[str, Any]):
     if not str(body.get("api_key") or "").strip():
         return _input_required([_field("api_key", "string", "Your Maneki api_key (from 'Maneki Account and Gas')")],
                                "api_key is required. Register first with the 'Maneki Account and Gas' service.")
@@ -107,7 +128,7 @@ def _need_account(body: Dict[str, Any]):
                 "status": "payment_pending",
                 "error": "this api_key's registration payment has not settled yet — retry in a few seconds"})
         return JSONResponse(status_code=403, content={"status": "error", "error": "unknown api_key"})
-    return acct
+    return await _resolve(acct)
 
 
 def _agent_brief(a: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,6 +143,12 @@ def _decision_brief(d: Dict[str, Any]) -> Dict[str, Any]:
     keys = ("ts", "tick", "action", "confidence", "reasoning", "reasoning_zh", "size_usd", "leverage",
             "executed", "mark", "mid", "note")
     return {k: d.get(k) for k in keys if k in d}
+
+
+def _ticket_brief(t: Dict[str, Any]) -> Dict[str, Any]:
+    keys = ("ticket_id", "symbol", "side", "status", "size", "entry_px", "exit_px", "pnl", "roe", "virtual",
+            "opened_at", "closed_at", "notional")
+    return {k: t.get(k) for k in keys if k in t}
 
 
 def _chat_unusable(data: Dict[str, Any]) -> bool:
@@ -155,7 +182,9 @@ async def info() -> Dict[str, Any]:
         "register_credits": s.register_credits,
         "paid_endpoints": ["/okx/v1/register", "/okx/v1/report"],
         "free_endpoints": ["/okx/v1/analyze", "/okx/v1/agents/create", "/okx/v1/agents/status",
-                           "/okx/v1/agents/control", "/okx/v1/report/get", "/okx/v1/symbols"],
+                           "/okx/v1/agents/control", "/okx/v1/authorize", "/okx/v1/account",
+                           "/okx/v1/report/get", "/okx/v1/symbols"],
+        "live_agents_enabled": s.live_agents,
         "listing": s.public_url("/okx/v1/listing"),
         "anchor": xlayer_anchor.anchor_status(),
         "dev_accept": s.dev_accept,
@@ -214,7 +243,7 @@ async def register(request: Request):
 @router.post("/analyze")
 async def analyze(request: Request):
     body = await _body(request)
-    acct = _need_account(body)
+    acct = await _need_account(body)
     if isinstance(acct, JSONResponse):
         return acct
     sym = _symbol(body.get("symbol"))
@@ -224,7 +253,7 @@ async def analyze(request: Request):
     question = str(body.get("question") or "").strip()[:500]
     message = question or f"Give me a structured market read on {sym} with a concrete trade idea."
     try:
-        data = await _core().chat(acct["payer"], message, symbol=sym, advice=True)
+        data = await _core().chat(_addr(acct), message, symbol=sym, advice=True)
     except CoreError as e:
         return _core_err(e)
     if data.get("insufficient_credits"):
@@ -252,7 +281,7 @@ async def analyze(request: Request):
 async def agents_create(request: Request):
     s = settings()
     body = await _body(request)
-    acct = _need_account(body)
+    acct = await _need_account(body)
     if isinstance(acct, JSONResponse):
         return acct
     sym = _symbol(body.get("symbol"))
@@ -263,6 +292,31 @@ async def agents_create(request: Request):
     if persona not in PERSONAS:
         return _input_required([_field("persona", "string", "one of " + "|".join(PERSONAS))],
                                f"persona must be one of {', '.join(PERSONAS)}.")
+    want_mode = str(body.get("mode") or "virtual").strip().lower()
+    if want_mode not in ("virtual", "paper", "live"):
+        return _input_required([_field("mode", "string", "virtual (default) or live")], "mode must be virtual or live.")
+    live = want_mode == "live"
+    if live:
+        if not s.live_agents:
+            return {"status": "live_disabled",
+                    "message": "Live (real Hyperliquid) agents are not enabled on this deployment; create a virtual agent instead."}
+        try:
+            st = await _core().link_status(acct["payer"])
+        except CoreError as e:
+            return _core_err(e)
+        auth_ = st.get("authorization") or {}
+        if not auth_.get("live_ready"):
+            return {"status": "authorization_required",
+                    "message": "A live agent trades a real Hyperliquid account. Link and authorize your browser wallet "
+                               "first: call 'Maneki Live Authorization' and open the link it returns.",
+                    "linked": st.get("linked"), "wallet": st.get("wallet"), "authorization": auth_}
+        if not body.get("confirm"):
+            return {"status": "confirmation_required",
+                    "message": "This will start an agent that places REAL orders on Hyperliquid with the linked wallet. "
+                               "Repeat the call with confirm=true to proceed.",
+                    "wallet": st.get("wallet"), "symbol": sym, "persona": persona,
+                    "capital_max": float(body.get("capital_max") or s.default_capital_max),
+                    "max_leverage": int(body.get("max_leverage") or s.default_max_leverage)}
     fields: Dict[str, Any] = {
         "symbol": f"xyz:{sym}",
         "label": str(body.get("label") or f"OKX {sym} {persona}")[:40],
@@ -276,20 +330,22 @@ async def agents_create(request: Request):
         "capital_max": float(body.get("capital_max") or s.default_capital_max),
         "margin_mode": "cross",
         "dry_run": 0,
-        "mode": "paper",          # virtual: decides, simulates fills, never orders
+        "mode": "live" if live else "paper",   # paper = virtual: decides, simulates fills, never orders
         "start": True,
     }
     if body.get("stop_loss_pct") is not None:
         fields["stop_loss_pct"] = float(body.get("stop_loss_pct"))
     try:
-        data = await _core().create_agent(acct["payer"], fields)
+        data = await _core().create_agent(_addr(acct), fields)
     except CoreError as e:
         return _core_err(e)
     agent = data.get("agent") or {}
     out = {"status": "created", "agent": _agent_brief(agent),
            "how_it_works": ("Every round the agent reads live Hyperliquid market data, decides with its persona under "
-                            "code-enforced leverage/notional/stop-loss limits, and simulates the fill. Use 'Maneki "
-                            "Agent Status' with this agent_id to follow its reasoning."),
+                            "code-enforced leverage/notional/stop-loss limits, and "
+                            + ("places the order on Hyperliquid with the linked wallet's API wallet." if live else
+                               "simulates the fill.")
+                            + " Use 'Maneki Agent Status' with this agent_id to follow its reasoning."),
            "dashboard_url": _dashboard("#agent")}
     if data.get("start_error"):
         out["status"] = "created_not_started"
@@ -300,22 +356,33 @@ async def agents_create(request: Request):
 @router.post("/agents/status")
 async def agents_status(request: Request):
     body = await _body(request)
-    acct = _need_account(body)
+    acct = await _need_account(body)
     if isinstance(acct, JSONResponse):
         return acct
-    addr = acct["payer"]
+    addr = _addr(acct)
     agent_id = str(body.get("agent_id") or "").strip()
     core = _core()
     try:
         if not agent_id:
-            data = await core.list_agents(addr)
+            agents = (await core.list_agents(addr)).get("agents") or []
+            if addr != acct["payer"]:   # agents created before the wallet link stay under the payer
+                agents += (await core.list_agents(acct["payer"])).get("agents") or []
             pts = await core.points(addr)
-            return {"status": "ok", "gas_balance": pts.get("balance"),
-                    "agents": [_agent_brief(a) for a in data.get("agents") or []],
+            return {"status": "ok", "gas_balance": pts.get("balance"), "account": addr,
+                    "agents": [_agent_brief(a) for a in agents],
                     "dashboard_url": _dashboard("#agent")}
-        a = (await core.get_agent(addr, agent_id)).get("agent") or {}
-        dec = (await core.decisions(addr, agent_id, limit=int(body.get("decisions") or 5))).get("decisions") or []
-        eq = await core.virtual_equity(addr, agent_id, limit=50)
+        owner = addr
+        try:
+            a = (await core.get_agent(owner, agent_id)).get("agent") or {}
+        except CoreError as e:
+            if e.status == 404 and addr != acct["payer"]:
+                owner = acct["payer"]
+                a = (await core.get_agent(owner, agent_id)).get("agent") or {}
+            else:
+                raise
+        dec = (await core.decisions(owner, agent_id, limit=int(body.get("decisions") or 5))).get("decisions") or []
+        eq = await core.virtual_equity(owner, agent_id, limit=50)
+        tk = (await core.tickets(owner, agent_id)).get("tickets") or []
         pts = await core.points(addr)
     except CoreError as e:
         return _core_err(e)
@@ -323,6 +390,7 @@ async def agents_status(request: Request):
     return {"status": "ok", "agent": _agent_brief(a),
             "virtual_equity": {"latest": latest, "points": (eq.get("points") or [])[-12:]},
             "recent_decisions": [_decision_brief(d) for d in dec],
+            "trades": [_ticket_brief(t) for t in tk[:10]],
             "gas_balance": pts.get("balance"),
             "dashboard_url": _dashboard("#agent")}
 
@@ -330,7 +398,7 @@ async def agents_status(request: Request):
 @router.post("/agents/control")
 async def agents_control(request: Request):
     body = await _body(request)
-    acct = _need_account(body)
+    acct = await _need_account(body)
     if isinstance(acct, JSONResponse):
         return acct
     agent_id = str(body.get("agent_id") or "").strip()
@@ -343,13 +411,24 @@ async def agents_control(request: Request):
     if missing:
         return _input_required(missing, "agent_id and action (start|stop|close_position|add_ticks) are required.")
     payload: Dict[str, Any] = {}
-    core_action = {"start": "start", "stop": "stop", "close_position": "close-position", "add_ticks": "add-ticks"}[action]
+    core_action = {"start": "start", "stop": "stop", "close_position": "close-position", "add_ticks": "add-ticks",
+                   "update": ""}[action]
     if action == "add_ticks":
         payload = {"ticks": int(body.get("ticks") or 12)}
     if action == "close_position":
         payload = {"origin": "okx_gateway"}
+    if action == "update":
+        allowed = ("label", "persona", "custom_prompt", "model", "interval_s", "max_ticks", "max_leverage",
+                   "capital_max", "stop_loss_pct")
+        payload = {k: body[k] for k in allowed if k in body}
+        if not payload:
+            return _input_required([_field(k, "string", "new value", required=False) for k in allowed],
+                                   "update needs at least one of: " + ", ".join(allowed))
     try:
-        data = await _core().agent_action(acct["payer"], agent_id, core_action, payload)
+        if action == "update":
+            data = await _core().patch_agent(_addr(acct), agent_id, payload)
+        else:
+            data = await _core().agent_action(_addr(acct), agent_id, core_action, payload)
     except CoreError as e:
         return _core_err(e)
     out: Dict[str, Any] = {"status": "ok", "action": action}
@@ -359,6 +438,67 @@ async def agents_control(request: Request):
         else:
             out["result"] = data
     return out
+
+
+# ---- live path (route A): link a browser wallet ----------------------------------------
+
+def _auth_view(st: Dict[str, Any]) -> Dict[str, Any]:
+    a = st.get("authorization") or {}
+    steps = []
+    if not st.get("linked"):
+        steps.append("Open the authorize link in a browser and sign in with the wallet whose Hyperliquid account "
+                     "Maneki should trade (one gasless signature).")
+    if not a.get("agent_wallet_approved"):
+        steps.append("In Settings, approve Maneki's API wallet on Hyperliquid (one signature, 180 days).")
+    if a.get("commission_required") and not a.get("commission_approved"):
+        steps.append("In Settings, authorize the builder commission (one signature).")
+    return {"linked": bool(st.get("linked")), "wallet": st.get("wallet") or None, "linked_at": st.get("linked_at"),
+            "authorization": a, "live_ready": bool(a.get("live_ready")), "remaining_steps": steps}
+
+
+@router.post("/authorize")
+async def authorize(request: Request):
+    """Mint a one-time link the human opens in a browser to bind (and authorize)
+    the wallet that Maneki may trade for real. The link is data for the human;
+    nothing here can sign on their behalf."""
+    s = settings()
+    body = await _body(request)
+    acct = await _need_account(body)
+    if isinstance(acct, JSONResponse):
+        return acct
+    try:
+        st = await _core().link_status(acct["payer"])
+        if st.get("linked") and (st.get("authorization") or {}).get("live_ready") and not body.get("force"):
+            return {"status": "already_authorized", **_auth_view(st),
+                    "note": "Pass force=true to mint a new link anyway (e.g. to switch wallets)."}
+        link = await _core().link_create(acct["payer"])
+    except CoreError as e:
+        return _core_err(e)
+    url = f"{s.dashboard_base}/#authorize?code={link['code']}"
+    return {"status": "link_ready", "authorize_url": url, "expires_in_s": link.get("ttl_s"),
+            "instructions": ["Open authorize_url in a browser (desktop wallet extension or a mobile wallet browser).",
+                             "Connect the wallet whose Hyperliquid account Maneki should trade and sign the login message (no gas).",
+                             "Approve Maneki's API wallet and, if shown, the commission in Settings.",
+                             "Come back and call 'Maneki Account' to confirm live_ready=true."],
+            "what_moves": "Your Agent Gas moves to the linked wallet's Maneki account; virtual and live agents then share it.",
+            **_auth_view(st)}
+
+
+@router.post("/account")
+async def account(request: Request):
+    body = await _body(request)
+    acct = await _need_account(body)
+    if isinstance(acct, JSONResponse):
+        return acct
+    try:
+        st = await _core().link_status(acct["payer"], fresh=bool(body.get("fresh")))
+        pts = await _core().points(_addr(acct))
+        agents = (await _core().list_agents(_addr(acct))).get("agents") or []
+    except CoreError as e:
+        return _core_err(e)
+    return {"status": "ok", "payer": acct["payer"], "account": _addr(acct), "gas_balance": pts.get("balance"),
+            "agents": len(agents), "live_agents_enabled": settings().live_agents, **_auth_view(st),
+            "dashboard_url": _dashboard("#settings")}
 
 
 # ---- paid: research report ------------------------------------------------------------
@@ -464,7 +604,7 @@ async def report(request: Request):
     # Whose Maneki account generates it: the api_key's if given, else the payer's
     # own (auto-created; the x402 payment identifies them).
     acct = _account(body) if body.get("api_key") else None
-    address = acct["payer"] if acct else payer
+    address = _addr(acct) if acct else payer
     order = store.create_order(payer, "report", sym, focus, s.price_report_usd)
     try:
         done = await asyncio.wait_for(asyncio.shield(_generate_report(order, address)), timeout=s.report_inline_budget_s)
@@ -498,7 +638,7 @@ async def report_get(request: Request):
         # Free re-delivery of a paid-but-undelivered order.
         acct = _account(body) if body.get("api_key") else None
         try:
-            o = await asyncio.wait_for(asyncio.shield(_generate_report(o, acct["payer"] if acct else o["payer"])),
+            o = await asyncio.wait_for(asyncio.shield(_generate_report(o, _addr(acct) if acct else o["payer"])),
                                        timeout=settings().report_inline_budget_s)
         except asyncio.TimeoutError:
             o = store.get_order(oid) or o

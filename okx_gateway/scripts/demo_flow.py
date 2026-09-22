@@ -91,6 +91,8 @@ async def main() -> int:
     ap.add_argument("--key", required=True, help="hex private key of the paying wallet")
     ap.add_argument("--symbol", default="NVDA")
     ap.add_argument("--no-report", action="store_true")
+    ap.add_argument("--link-key", default="", help="hex private key of a BROWSER wallet: plays the human side of "
+                                                   "'Maneki Live Authorization' (wallet login + claim) over the API")
     ap.add_argument("--wait", type=int, default=0, help="seconds to wait before reading agent status")
     args = ap.parse_args()
 
@@ -136,6 +138,26 @@ async def main() -> int:
             st = httpx.post(f"{args.base}/okx/v1/agents/status",
                             json={"api_key": api_key, "agent_id": agent_id}, timeout=30).json()
             show("agents/status", st)
+
+        # 4b) route A: link a browser wallet (the human's part, replayed over the API)
+        if args.link_key:
+            au = httpx.post(f"{args.base}/okx/v1/authorize", json={"api_key": api_key}, timeout=30).json()
+            show("authorize", au)
+            code = (au.get("authorize_url") or "").split("code=")[-1]
+            if code:
+                w = Account.from_key(args.link_key)
+                n = httpx.post(f"{args.base}/api/auth/nonce", json={"address": w.address}, timeout=30).json()
+                from eth_account.messages import encode_defunct
+                sig = w.sign_message(encode_defunct(text=n["message"])).signature.hex()
+                if not sig.startswith("0x"):
+                    sig = "0x" + sig
+                v = httpx.post(f"{args.base}/api/auth/verify", json={"address": w.address, "signature": sig}, timeout=30).json()
+                tok = v.get("token", "")
+                cl = httpx.post(f"{args.base}/api/link/claim", json={"code": code},
+                                headers={"Authorization": f"Bearer {tok}"}, timeout=30).json()
+                show("claim (as the browser wallet)", cl)
+                acc = httpx.post(f"{args.base}/okx/v1/account", json={"api_key": api_key, "fresh": True}, timeout=60).json()
+                show("account after link", acc)
 
         # 5) a paid report + digest verification
         if not args.no_report:

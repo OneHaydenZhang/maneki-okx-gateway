@@ -89,6 +89,9 @@ class Settings:
     # X Layer anchoring of report hashes (optional; off when the key is empty).
     anchor_key: str = field(default_factory=lambda: _env("XLAYER_ANCHOR_PRIVATE_KEY"))
     anchor_rpc: str = field(default_factory=lambda: _env("XLAYER_ANCHOR_RPC"))
+    # Live (real Hyperliquid) agents through the gateway: off by default. Needs a
+    # linked + authorized browser wallet (route A) even when on.
+    live_agents: bool = field(default_factory=lambda: _flag("OKX_LIVE_AGENTS"))
     # Storage
     data_dir: Path = field(default_factory=lambda: Path(_env("OKX_GATEWAY_DATA") or (ROOT / "data" / "okx_gateway")))
 

@@ -24,6 +24,8 @@ an exchange. The live-account path is documented in `docs/LIVE_PATH.md`.
 | Maneki Virtual Trading Agent | `/okx/v1/agents/create` | free (Gas per round) | `api_key`, `symbol`, `persona?` |
 | Maneki Agent Status | `/okx/v1/agents/status` | free | `api_key`, `agent_id?` |
 | Maneki Agent Control | `/okx/v1/agents/control` | free | `api_key`, `agent_id`, `action` |
+| Maneki Live Authorization | `/okx/v1/authorize` | free | `api_key` |
+| Maneki Account Status | `/okx/v1/account` | free | `api_key` |
 | Maneki Research Report | `/okx/v1/report` | $0.5 (x402) | `symbol`, `focus?` |
 | Maneki Report Retrieval | `/okx/v1/report/get` | free | `order_id` |
 | Verify a report | `GET /okx/v1/report/{order_id}/verify` | public | — |
@@ -39,6 +41,18 @@ which the OKX probe turns into a question for the user. Business conditions
 
 `GET /okx/v1/listing` returns the exact `--service` array for
 `onchainos agent create --role asp …`, generated from the same code as the routes.
+
+## Live accounts (route A)
+
+`/okx/v1/authorize` returns a one-time link (`https://<dashboard>/#authorize?code=…`).
+The human opens it, signs in with the browser wallet whose Hyperliquid account
+Maneki may trade (one gasless signature), and approves Maneki's API wallet on
+Hyperliquid in Settings. From then on the gateway acts for that wallet: its
+Agent Gas moves there, `/okx/v1/account` reports `live_ready`, and
+`/okx/v1/agents/create` accepts `mode: "live"` — only when the deployment sets
+`OKX_LIVE_AGENTS=1`, the wallet is linked and approved, **and** the call
+repeats with `confirm: true`. Nothing in this flow signs on the user's behalf;
+the link is data the user's agent shows them.
 
 ## Payments
 
@@ -90,6 +104,8 @@ facilitator for one that accepts any well-formed authorization.
 | `OKX_PRICE_REGISTER_USD` / `OKX_PRICE_REPORT_USD` | prices | `1` / `0.5` |
 | `OKX_DEFAULT_PERSONA` `OKX_DEFAULT_MODEL` `OKX_DEFAULT_INTERVAL_S` `OKX_DEFAULT_MAX_TICKS` `OKX_DEFAULT_CAPITAL_MAX` `OKX_DEFAULT_MAX_LEVERAGE` | agent defaults | navigator / deepseek / 3600 / 24 / 200 / 3 |
 | `XLAYER_ANCHOR_PRIVATE_KEY` | key that pays gas for report anchoring (optional) | — |
+| `OKX_LIVE_AGENTS` | allow `mode: live` agents (still needs link + approvals + confirm) | `0` |
+| `MANEKI_DASHBOARD_BASE` | origin of the Maneki web app the authorize link opens | `https://manekiai.io` |
 | `OKX_GATEWAY_DATA` | SQLite dir for accounts/orders | `data/okx_gateway` |
 
 ## Try it
@@ -100,6 +116,7 @@ python okx_gateway/scripts/demo_flow.py --base http://127.0.0.1:4180 --key 0x<pr
 
 Plays a buyer end to end with the official SDK client: 402 → signed EIP-3009
 authorization → registration → analysis → virtual agent → paid report → digest check.
+Add `--link-key 0x<another key>` to replay the human side of the live authorization (wallet login + claim).
 
 From an OKX AI agent, the same thing is: *"find ManekiAI on OKX.AI and open an
 account"*, then *"create a Maneki virtual agent on NVDA"*.

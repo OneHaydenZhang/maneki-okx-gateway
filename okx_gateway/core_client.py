@@ -94,6 +94,16 @@ class CoreClient:
         params = {"agent": agent_id} if agent_id else None
         return await self._req("GET", "/api/tickets", address, params=params)
 
+    async def patch_agent(self, address: str, agent_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._req("PATCH", f"/api/agents/{agent_id}", address, json=fields)
+
+    async def link_create(self, payer: str) -> Dict[str, Any]:
+        return await self._req("POST", "/api/gateway/link/create", json={"payer": payer})
+
+    async def link_status(self, payer: str, fresh: bool = False, light: bool = False) -> Dict[str, Any]:
+        return await self._req("POST", "/api/gateway/link/status",
+                               json={"payer": payer, "fresh": int(fresh), "light": int(light)})
+
     # ---- gateway-only --------------------------------------------------------
     async def credit(self, address: str, credits: int, txhash: str, usd: float, note: str = "") -> Dict[str, Any]:
         return await self._req("POST", "/api/gateway/credit", address,
