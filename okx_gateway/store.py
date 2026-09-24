@@ -73,6 +73,13 @@ def _conn() -> sqlite3.Connection:
         if "address" not in cols:
             c.execute("ALTER TABLE accounts ADD COLUMN address TEXT DEFAULT ''")
             c.commit()
+        scols = {r[1] for r in c.execute("PRAGMA table_info(settlements)").fetchall()}
+        if "credited" not in scols:
+            # 0 = core credit still owed (retried on later calls), 1 = done, -1 = not a credit (report)
+            c.execute("ALTER TABLE settlements ADD COLUMN credited INTEGER DEFAULT 1")
+            c.execute("ALTER TABLE settlements ADD COLUMN credits INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE settlements ADD COLUMN target TEXT DEFAULT ''")
+            c.commit()
         _CONN, _PATH = c, want
     return _CONN
 
@@ -135,19 +142,41 @@ def account_for_payer(payer: str) -> Optional[Dict[str, Any]]:
 
 # ---- settlements (idempotency) ---------------------------------------------------
 
-def record_settlement(txhash: str, payer: str, resource: str, usd: float) -> bool:
-    """True the first time this txhash is seen."""
+def record_settlement(txhash: str, payer: str, resource: str, usd: float,
+                      credits: int = 0, target: str = "") -> bool:
+    """True the first time this txhash is seen. A registration settlement
+    starts with credited=0 (core credit owed) until mark_credited()."""
     if not txhash:
         return False
     with _LOCK:
         c = _conn()
         try:
-            c.execute("INSERT INTO settlements(txhash, payer, resource, usd, ts) VALUES(?,?,?,?,?)",
-                      (txhash.lower(), payer.lower(), resource, float(usd), time.time()))
+            c.execute("INSERT INTO settlements(txhash, payer, resource, usd, ts, credited, credits, target) "
+                      "VALUES(?,?,?,?,?,?,?,?)",
+                      (txhash.lower(), payer.lower(), resource, float(usd), time.time(),
+                       0 if credits > 0 else -1, int(credits), target.lower()))
             c.commit()
             return True
         except sqlite3.IntegrityError:
             return False
+
+
+def mark_credited(txhash: str) -> None:
+    with _LOCK:
+        c = _conn()
+        c.execute("UPDATE settlements SET credited=1 WHERE txhash=?", (txhash.lower(),))
+        c.commit()
+
+
+def pending_credits(payer: str = "") -> List[Dict[str, Any]]:
+    """Registration settlements whose core credit has not landed yet."""
+    with _LOCK:
+        c = _conn()
+        if payer:
+            rows = c.execute("SELECT * FROM settlements WHERE credited=0 AND payer=? ORDER BY ts", (payer.lower(),)).fetchall()
+        else:
+            rows = c.execute("SELECT * FROM settlements WHERE credited=0 ORDER BY ts").fetchall()
+        return [dict(r) for r in rows]
 
 
 # ---- orders ----------------------------------------------------------------------

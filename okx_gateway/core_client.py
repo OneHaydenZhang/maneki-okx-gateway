@@ -68,9 +68,10 @@ class CoreClient:
         return await self._req("GET", "/api/points", address)
 
     async def chat(self, address: str, message: str, symbol: str = "", advice: bool = True,
-                   timeout: float = 90.0) -> Dict[str, Any]:
+                   timeout: float = 90.0, prepaid: bool = False) -> Dict[str, Any]:
         return await self._req("POST", "/api/chat/send", address,
-                               json={"message": message, "symbol": symbol, "advice": advice}, timeout=timeout)
+                               json={"message": message, "symbol": symbol, "advice": advice, "prepaid": prepaid},
+                               timeout=timeout)
 
     async def create_agent(self, address: str, fields: Dict[str, Any]) -> Dict[str, Any]:
         return await self._req("POST", "/api/agents", address, json=fields)

@@ -81,6 +81,28 @@ def _payer(request: Request) -> str:
     return ""
 
 
+class _BadField(Exception):
+    def __init__(self, name: str, typ: str, desc: str):
+        super().__init__(name)
+        self.field = _field(name, typ, desc)
+
+
+def _num(body: Dict[str, Any], name: str, default: Any, kind: str = "number", desc: str = ""):
+    """Caller-supplied number → int/float, or _BadField (→ input_required, never a 500)."""
+    raw = body.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        v = float(raw)
+        if kind == "integer":
+            if abs(v - round(v)) > 1e-9:
+                raise ValueError
+            return int(round(v))
+        return v
+    except (TypeError, ValueError):
+        raise _BadField(name, kind, desc or f"{name} must be a {kind}")
+
+
 def _symbol(raw: Any) -> str:
     sym = str(raw or "").strip().upper()
     if sym.startswith("XYZ:"):
@@ -107,9 +129,38 @@ async def _resolve(acct: Dict[str, Any]) -> Dict[str, Any]:
         if want != (acct.get("address") or ""):
             store.set_address(acct["payer"], want)
             acct = dict(acct, address=want)
+        acct = dict(acct, wallets=[w.lower() for w in (st.get("wallets") or []) if w])
     except CoreError:
         pass
+    # A registration whose core credit failed at settlement time is retried here.
+    if store.pending_credits(acct["payer"]):
+        from .paywall import retry_pending_credits
+        await retry_pending_credits(acct["payer"])
     return acct
+
+
+def _owners(acct: Dict[str, Any]) -> List[str]:
+    """Every Maneki address this OKX account's agents may live under: the
+    current wallet first, then earlier linked wallets, then the payer."""
+    out: List[str] = []
+    for a in [_addr(acct), *acct.get("wallets", []), acct["payer"]]:
+        if a and a not in out:
+            out.append(a)
+    return out
+
+
+async def _find_owner(acct: Dict[str, Any], agent_id: str) -> str:
+    """The address that owns agent_id (404 → CoreError from the last try)."""
+    core = _core()
+    owners = _owners(acct)
+    for i, owner in enumerate(owners):
+        try:
+            await core.get_agent(owner, agent_id)
+            return owner
+        except CoreError as e:
+            if e.status != 404 or i == len(owners) - 1:
+                raise
+    return _addr(acct)
 
 
 def _addr(acct: Dict[str, Any]) -> str:
@@ -311,8 +362,11 @@ async def agents_create(request: Request):
                     "message": "A live agent trades a real Hyperliquid account. Link and authorize your browser wallet "
                                "first: call 'Maneki Live Authorization' and open the link it returns.",
                     "linked": st.get("linked"), "wallet": st.get("wallet"), "authorization": auth_}
-        cap_usd = float(body.get("capital_max") or s.default_capital_max)
-        cap_lev = int(body.get("max_leverage") or s.default_max_leverage)
+        try:
+            cap_usd = _num(body, "capital_max", s.default_capital_max, "number", "USD budget")
+            cap_lev = _num(body, "max_leverage", s.default_max_leverage, "integer", "maximum leverage")
+        except _BadField as bf:
+            return _input_required([bf.field], f"{bf.field['name']}: {bf.field['description']}")
         if cap_usd > s.live_capital_max or cap_lev > s.live_max_leverage:
             return {"status": "limit_exceeded",
                     "message": (f"Live agents created from OKX AI are capped at ${s.live_capital_max:g} capital and "
@@ -324,26 +378,28 @@ async def agents_create(request: Request):
                     "message": "This will start an agent that places REAL orders on Hyperliquid with the linked wallet. "
                                "Repeat the call with confirm=true to proceed.",
                     "wallet": st.get("wallet"), "symbol": sym, "persona": persona,
-                    "capital_max": float(body.get("capital_max") or s.default_capital_max),
-                    "max_leverage": int(body.get("max_leverage") or s.default_max_leverage)}
-    fields: Dict[str, Any] = {
-        "symbol": f"xyz:{sym}",
-        "label": str(body.get("label") or f"OKX {sym} {persona}")[:40],
-        "persona": persona,
-        "custom_prompt": str(body.get("custom_prompt") or "")[:4000] if persona == "custom" else "",
-        "model": str(body.get("model") or s.default_model),
-        "interval_s": int(body.get("interval_s") or s.default_interval_s),
-        "max_ticks": int(body.get("max_ticks") if body.get("max_ticks") is not None else s.default_max_ticks),
-        "max_leverage": int(body.get("max_leverage") or s.default_max_leverage),
-        "capital_mode": "range",
-        "capital_max": float(body.get("capital_max") or s.default_capital_max),
-        "margin_mode": "cross",
-        "dry_run": 0,
-        "mode": "live" if live else "paper",   # paper = virtual: decides, simulates fills, never orders
-        "start": True,
-    }
-    if body.get("stop_loss_pct") is not None:
-        fields["stop_loss_pct"] = float(body.get("stop_loss_pct"))
+                    "capital_max": cap_usd, "max_leverage": cap_lev}
+    try:
+        fields: Dict[str, Any] = {
+            "symbol": f"xyz:{sym}",
+            "label": str(body.get("label") or f"OKX {sym} {persona}")[:40],
+            "persona": persona,
+            "custom_prompt": str(body.get("custom_prompt") or "")[:4000] if persona == "custom" else "",
+            "model": str(body.get("model") or s.default_model),
+            "interval_s": _num(body, "interval_s", s.default_interval_s, "integer", "seconds between decision rounds"),
+            "max_ticks": _num(body, "max_ticks", s.default_max_ticks, "integer", "rounds to run (0 = until stopped)"),
+            "max_leverage": _num(body, "max_leverage", s.default_max_leverage, "integer", "maximum leverage, e.g. 3"),
+            "capital_mode": "range",
+            "capital_max": _num(body, "capital_max", s.default_capital_max, "number", "USD budget, e.g. 200"),
+            "margin_mode": "cross",
+            "dry_run": 0,
+            "mode": "live" if live else "paper",   # paper = virtual: decides, simulates fills, never orders
+            "start": True,
+        }
+        if body.get("stop_loss_pct") is not None:
+            fields["stop_loss_pct"] = _num(body, "stop_loss_pct", 0.0, "number", "stop-loss as % of ROE, e.g. 25")
+    except _BadField as bf:
+        return _input_required([bf.field], f"{bf.field['name']}: {bf.field['description']}")
     try:
         data = await _core().create_agent(_addr(acct), fields)
     except CoreError as e:
@@ -373,23 +429,20 @@ async def agents_status(request: Request):
     core = _core()
     try:
         if not agent_id:
-            agents = (await core.list_agents(addr)).get("agents") or []
-            if addr != acct["payer"]:   # agents created before the wallet link stay under the payer
-                agents += (await core.list_agents(acct["payer"])).get("agents") or []
+            agents: List[Dict[str, Any]] = []
+            for owner in _owners(acct):   # agents created before a wallet link stay under the earlier owner
+                agents += (await core.list_agents(owner)).get("agents") or []
             pts = await core.points(addr)
             return {"status": "ok", "gas_balance": pts.get("balance"), "account": addr,
                     "agents": [_agent_brief(a) for a in agents],
                     "dashboard_url": _dashboard("#agent")}
-        owner = addr
+        owner = await _find_owner(acct, agent_id)
+        a = (await core.get_agent(owner, agent_id)).get("agent") or {}
         try:
-            a = (await core.get_agent(owner, agent_id)).get("agent") or {}
-        except CoreError as e:
-            if e.status == 404 and addr != acct["payer"]:
-                owner = acct["payer"]
-                a = (await core.get_agent(owner, agent_id)).get("agent") or {}
-            else:
-                raise
-        dec = (await core.decisions(owner, agent_id, limit=int(body.get("decisions") or 5))).get("decisions") or []
+            n_dec = _num(body, "decisions", 5, "integer", "how many recent decisions to return")
+        except _BadField as bf:
+            return _input_required([bf.field], bf.field["description"])
+        dec = (await core.decisions(owner, agent_id, limit=n_dec)).get("decisions") or []
         eq = await core.virtual_equity(owner, agent_id, limit=50)
         tk = (await core.tickets(owner, agent_id)).get("tickets") or []
         pts = await core.points(addr)
@@ -422,20 +475,25 @@ async def agents_control(request: Request):
     payload: Dict[str, Any] = {}
     core_action = {"start": "start", "stop": "stop", "close_position": "close-position", "add_ticks": "add-ticks",
                    "update": ""}[action]
-    if action == "add_ticks":
-        payload = {"ticks": int(body.get("ticks") or 12)}
-    if action == "close_position":
-        payload = {"origin": "okx_gateway"}
-    if action == "update":
-        allowed = ("label", "persona", "custom_prompt", "model", "interval_s", "max_ticks", "max_leverage",
-                   "capital_max", "stop_loss_pct")
-        payload = {k: body[k] for k in allowed if k in body}
-        if not payload:
-            return _input_required([_field(k, "string", "new value", required=False) for k in allowed],
-                                   "update needs at least one of: " + ", ".join(allowed))
     try:
+        if action == "add_ticks":
+            payload = {"ticks": _num(body, "ticks", 12, "integer", "rounds to add")}
+        if action == "close_position":
+            payload = {"origin": "okx_gateway"}
+        if action == "update":
+            numeric = {"interval_s": "integer", "max_ticks": "integer", "max_leverage": "integer",
+                       "capital_max": "number", "stop_loss_pct": "number"}
+            allowed = ("label", "persona", "custom_prompt", "model", *numeric)
+            payload = {k: (_num(body, k, None, numeric[k]) if k in numeric else body[k]) for k in allowed if k in body}
+            if not payload:
+                return _input_required([_field(k, "string", "new value", required=False) for k in allowed],
+                                       "update needs at least one of: " + ", ".join(allowed))
+    except _BadField as bf:
+        return _input_required([bf.field], f"{bf.field['name']}: {bf.field['description']}")
+    try:
+        owner = await _find_owner(acct, agent_id)
         if action == "update" and ("capital_max" in payload or "max_leverage" in payload):
-            cur = (await _core().get_agent(_addr(acct), agent_id)).get("agent") or {}
+            cur = (await _core().get_agent(owner, agent_id)).get("agent") or {}
             if (cur.get("mode") or "live") == "live":
                 s = settings()
                 if float(payload.get("capital_max") or 0) > s.live_capital_max or \
@@ -444,9 +502,9 @@ async def agents_control(request: Request):
                             "message": f"Live agents are capped at ${s.live_capital_max:g} / {s.live_max_leverage}x here.",
                             "limits": {"capital_max": s.live_capital_max, "max_leverage": s.live_max_leverage}}
         if action == "update":
-            data = await _core().patch_agent(_addr(acct), agent_id, payload)
+            data = await _core().patch_agent(owner, agent_id, payload)
         else:
-            data = await _core().agent_action(_addr(acct), agent_id, core_action, payload)
+            data = await _core().agent_action(owner, agent_id, core_action, payload)
     except CoreError as e:
         return _core_err(e)
     out: Dict[str, Any] = {"status": "ok", "action": action}
@@ -516,9 +574,14 @@ async def account(request: Request):
         agents = (await _core().list_agents(_addr(acct))).get("agents") or []
     except CoreError as e:
         return _core_err(e)
-    return {"status": "ok", "payer": acct["payer"], "account": _addr(acct), "gas_balance": pts.get("balance"),
-            "agents": len(agents), "live_agents_enabled": settings().live_agents, **_auth_view(st),
-            "dashboard_url": _dashboard("#settings")}
+    out = {"status": "ok", "payer": acct["payer"], "account": _addr(acct), "gas_balance": pts.get("balance"),
+           "agents": len(agents), "live_agents_enabled": settings().live_agents, **_auth_view(st),
+           "dashboard_url": _dashboard("#settings")}
+    pend = store.pending_credits(acct["payer"])
+    if pend:
+        out["pending_credits"] = sum(int(r["credits"]) for r in pend)
+        out["note"] = "A paid top-up is still being credited; it lands automatically on your next call."
+    return out
 
 
 # ---- paid: research report ------------------------------------------------------------
@@ -560,16 +623,16 @@ async def _generate_report(order: Dict[str, Any], address: str) -> Dict[str, Any
     symbol, focus, oid = order["symbol"], order["focus"], order["order_id"]
     store.update_order(oid, status="generating")
     try:
+        # The report was paid via x402: the core is told the message is prepaid
+        # (honoured only for gateway-asserted requests), so no Gas is needed.
         data = await _core().chat(address, REPORT_PROMPT.format(symbol=symbol, focus=focus or "general outlook"),
-                                  symbol=symbol, advice=True, timeout=120.0)
+                                  symbol=symbol, advice=True, timeout=120.0, prepaid=True)
     except CoreError as e:
         store.update_order(oid, status="failed", error=e.message[:300])
         raise
     if data.get("insufficient_credits"):
-        # The report itself was paid via x402; core chat billing must not block it.
-        # Runs against the gateway's own service account in that case.
-        store.update_order(oid, status="failed", error="core refused: insufficient gas on service account")
-        raise CoreError(502, "report generation unavailable (service account out of Gas)")
+        store.update_order(oid, status="failed", error="core refused: chat billing")
+        raise CoreError(502, "report generation unavailable")
     if _chat_unusable(data):
         store.update_order(oid, status="failed", error="model busy")
         raise CoreError(503, "model busy — the order is kept; retrieve it again in a minute (no new payment)")

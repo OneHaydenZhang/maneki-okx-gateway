@@ -83,6 +83,36 @@ def _resource_url(payload: Any) -> str:
         return ""
 
 
+async def effective_address_of(payer: str) -> str:
+    """Where this payer's Gas lives right now, asked of the core (link record),
+    falling back to the gateway's cached column, then the payer itself."""
+    try:
+        st = await CoreClient().link_status(payer, light=True)
+        if st.get("linked") and st.get("wallet"):
+            return str(st["wallet"]).lower()
+        return payer
+    except Exception:
+        acct = store.account_for_payer(payer)
+        return store.effective_address(acct) if acct else payer
+
+
+async def retry_pending_credits(payer: str = "") -> int:
+    """Re-attempt core credits that failed at settlement time. The core is
+    idempotent on txhash, so a retry can never double-credit. Returns the
+    number of settlements credited on this pass."""
+    done = 0
+    for row in store.pending_credits(payer):
+        target = row.get("target") or await effective_address_of(row["payer"])
+        try:
+            await CoreClient().credit(target, int(row["credits"]), row["txhash"], float(row["usd"]),
+                                      note=f"OKX AI x402 registration/top-up {row['txhash'][:12]} (retry)")
+            store.mark_credited(row["txhash"])
+            done += 1
+        except Exception as e:
+            print(f"[okx-gateway] credit retry failed for {row['payer']} tx={row['txhash']}: {e!r}")
+    return done
+
+
 async def on_settled(payload: Any, requirements: Any, res: Any) -> None:
     s = settings()
     payer = (getattr(res, "payer", None) or payer_of(payload) or "").lower()
@@ -93,17 +123,25 @@ async def on_settled(payload: Any, requirements: Any, res: Any) -> None:
         tx = "nonce:" + (nonce_of(payload) or "unknown")
     url = _resource_url(payload)
     usd = _usd_of(requirements, s)
-    if not store.record_settlement(tx, payer, url, usd):
-        return   # replayed receipt
     if url.endswith(REGISTER_PATH) or REGISTER_PATH in url:
         credits = int(round(usd * 1000)) if usd > 0 else s.register_credits
+        target = await effective_address_of(payer)
+        if not store.record_settlement(tx, payer, url, usd, credits=credits, target=target):
+            return   # replayed receipt (a still-pending one is retried by retry_pending_credits)
         acct = store.mark_paid(payer, tx, credits, usd)
-        target = store.effective_address(acct)
+        if target != store.effective_address(acct):
+            store.set_address(payer, target)
         try:
             await CoreClient().credit(target, credits, tx, usd, note=f"OKX AI x402 registration/top-up {tx[:12]}")
+            store.mark_credited(tx)
         except Exception as e:
-            print(f"[okx-gateway] core credit failed for {payer} tx={tx}: {e!r}")
-    elif url.endswith(REPORT_PATH) or REPORT_PATH in url:
+            # Money is in; the credit is owed. Left pending → retried on the
+            # payer's next call (and by anyone hitting /account).
+            print(f"[okx-gateway] core credit failed for {payer} tx={tx}: {e!r} — queued for retry")
+        return
+    if not store.record_settlement(tx, payer, url, usd):
+        return   # replayed receipt
+    if url.endswith(REPORT_PATH) or REPORT_PATH in url:
         o = store.latest_pending_order(payer, "report")
         if o is None:
             # Handler already delivered (fast path) — attach to the newest order instead.
