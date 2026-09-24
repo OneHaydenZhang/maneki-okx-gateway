@@ -7,6 +7,7 @@ Both are idempotent on the settlement tx hash.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict
 
 from fastapi import FastAPI
@@ -36,10 +37,15 @@ def _price(s: Settings, usd: float) -> Any:
                        extra={"name": a["name"], "version": a["version"]})
 
 
-def _unpaid(status: str, message: str):
+def _unpaid(status: str, message: str, path: str):
+    """402 body: besides the human message, the parameter schema the OKX client
+    needs to carry parameters on the paid replay (`outputSchema.input`)."""
+    from . import schema
     def body(ctx: Any) -> HTTPResponseBody:
         return HTTPResponseBody(content_type="application/json",
-                                body={"status": status, "message": message})
+                                body={"status": status, "message": message,
+                                      "outputSchema": schema.output_schema(path),
+                                      "required": schema.required_names(path)})
     return body
 
 
@@ -54,7 +60,7 @@ def routes_config(s: Settings) -> Dict[str, RouteConfig]:
             mime_type="application/json",
             unpaid_response_body=_unpaid("payment_required",
                                          f"Pay ${s.price_register_usd:g} on X Layer to open/top up a ManekiAI account "
-                                         f"and receive {int(round(s.price_register_usd * 1000))} Agent Gas.")),
+                                         f"and receive {int(round(s.price_register_usd * 1000))} Agent Gas.", REGISTER_PATH)),
         f"POST {REPORT_PATH}": RouteConfig(
             accepts=[PaymentOption(scheme="exact", pay_to=s.pay_to, price=_price(s, s.price_report_usd),
                                    network=s.network, **common)],
@@ -63,7 +69,7 @@ def routes_config(s: Settings) -> Dict[str, RouteConfig]:
             mime_type="application/json",
             unpaid_response_body=_unpaid("payment_required",
                                          f"Pay ${s.price_report_usd:g} on X Layer for one research report; "
-                                         "body needs symbol (and optional focus).")),
+                                         "body needs symbol (and optional focus).", REPORT_PATH)),
     }
 
 
@@ -151,11 +157,50 @@ async def on_settled(payload: Any, requirements: Any, res: Any) -> None:
             store.update_order(o["order_id"], txhash=tx, settle_status="success")
 
 
+class ParamPrecheck:
+    """Pure-ASGI middleware that runs BEFORE the paywall: a paid route whose
+    required parameters are missing answers 400 input_required right away, so
+    nobody signs a payment for a call that could never be delivered (OKX
+    listing rule: validate before returning the x402 challenge)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") not in (REPORT_PATH, REGISTER_PATH):
+            return await self.app(scope, receive, send)
+        chunks = []
+        while True:
+            msg = await receive()
+            chunks.append(msg.get("body", b""))
+            if not msg.get("more_body"):
+                break
+        raw = b"".join(chunks)
+        from .router import parse_params, precheck_paid
+        params = parse_params(raw, scope)
+        problem = precheck_paid(scope["path"], params)
+        if problem is not None:
+            body = json.dumps(problem).encode()
+            await send({"type": "http.response.start", "status": 400,
+                        "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+            await send({"type": "http.response.body", "body": body})
+            return
+        sent = {"done": False}
+        async def replay():
+            if sent["done"]:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            sent["done"] = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+        return await self.app(scope, replay, send)
+
+
 def install(app: FastAPI, s: Settings | None = None) -> x402ResourceServer:
-    """Adds the x402 middleware to `app`. Returns the resource server (tests)."""
+    """Adds the x402 middleware (and the pre-paywall parameter check) to `app`.
+    Returns the resource server (tests)."""
     s = s or settings()
     facilitator = build_facilitator(s, on_settled)
     server = x402ResourceServer(facilitator)
     server.register(s.network, ExactEvmScheme())
     app.add_middleware(PaymentMiddlewareASGI, routes=routes_config(s), server=server)
+    app.add_middleware(ParamPrecheck)   # added last = outermost = runs first
     return server

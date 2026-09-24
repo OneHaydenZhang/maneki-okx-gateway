@@ -95,6 +95,11 @@ class Settings:
     # Hard ceilings for agents created from a conversation (real money only).
     live_capital_max: float = field(default_factory=lambda: _float("OKX_LIVE_CAPITAL_MAX", 500.0))
     live_max_leverage: int = field(default_factory=lambda: _int("OKX_LIVE_MAX_LEVERAGE", 3))
+    # Demo key: lets anyone (including OKX.AI's listing reviewer, who runs the
+    # Request Example curl literally) exercise the read-only tools against a
+    # house account. Writes are previewed, never executed, under this key.
+    demo_api_key: str = field(default_factory=lambda: _env("OKX_DEMO_API_KEY", "mk_demo"))
+    demo_payer: str = field(default_factory=lambda: _env("OKX_DEMO_PAYER").lower())
     # Storage
     data_dir: Path = field(default_factory=lambda: Path(_env("OKX_GATEWAY_DATA") or (ROOT / "data" / "okx_gateway")))
 

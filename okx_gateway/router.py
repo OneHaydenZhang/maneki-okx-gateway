@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import listing, store, xlayer_anchor
+from . import listing, schema, store, xlayer_anchor
 from .config import settings
 from .core_client import CoreClient, CoreError
 from .facilitator import payer_of
@@ -41,21 +41,54 @@ def _core() -> CoreClient:
     return CoreClient()
 
 
+def parse_params(raw: bytes, scope: Dict[str, Any]) -> Dict[str, Any]:
+    """Parameters from wherever a client put them: JSON body (any content type),
+    form body, or the query string. Body wins over query."""
+    from urllib.parse import parse_qsl
+    out: Dict[str, Any] = {}
+    qs = scope.get("query_string") or b""
+    if qs:
+        for k, v in parse_qsl(qs.decode("utf-8", "replace"), keep_blank_values=True):
+            out[k] = v
+    text = (raw or b"").decode("utf-8", "replace").strip()
+    if text:
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                out.update(data)
+        except ValueError:
+            for k, v in parse_qsl(text, keep_blank_values=True):
+                out[k] = v
+    return out
+
+
 async def _body(request: Request) -> Dict[str, Any]:
-    try:
-        data = await request.json()
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+    raw = await request.body()
+    return parse_params(raw, request.scope)
+
+
+def precheck_paid(path: str, params: Dict[str, Any]):
+    """Before the paywall: the 400 input_required a paid route would answer
+    after payment, or None when the call can be delivered."""
+    if path == "/okx/v1/report" and not _symbol(params.get("symbol")):
+        return _input_required_dict(path, [_field("symbol", "string", "US-stock perp ticker, e.g. NVDA"),
+                                           _field("focus", "string", "what the report should answer", required=False)],
+                                    "symbol is required (a Hyperliquid US-stock perp ticker such as NVDA).")
+    return None
 
 
 def _field(name: str, typ: str, desc: str, required: bool = True) -> Dict[str, Any]:
     return {"name": name, "type": typ, "required": required, "carrier": "body", "description": desc}
 
 
-def _input_required(fields: List[Dict[str, Any]], message: str) -> JSONResponse:
-    return JSONResponse(status_code=400, content={"status": "input_required", "fields": fields,
-                                                  "message": message, "method": "POST"})
+def _input_required_dict(path: str, fields: List[Dict[str, Any]], message: str) -> Dict[str, Any]:
+    return {"status": "input_required", "fields": fields, "message": message, "method": "POST",
+            "required": [f["name"] for f in fields if f.get("required")],
+            "outputSchema": schema.output_schema(path)}
+
+
+def _input_required(fields: List[Dict[str, Any]], message: str, path: str = "") -> JSONResponse:
+    return JSONResponse(status_code=400, content=_input_required_dict(path, fields, message))
 
 
 def _err(status: int, message: str, **extra: Any) -> JSONResponse:
@@ -167,10 +200,32 @@ def _addr(acct: Dict[str, Any]) -> str:
     return store.effective_address(acct)
 
 
+def _is_demo(acct: Dict[str, Any]) -> bool:
+    return bool(acct.get("demo"))
+
+
+def _demo_reply(what: str, preview: Any = None) -> Dict[str, Any]:
+    out = {"status": "demo", "demo": True,
+           "message": f"Demo key: {what}. Register with 'Maneki Account and Gas' (1 USDT) to get your own api_key "
+                      "and do this for real."}
+    if preview is not None:
+        out["preview"] = preview
+    return out
+
+
 async def _need_account(body: Dict[str, Any]):
-    if not str(body.get("api_key") or "").strip():
+    key = str(body.get("api_key") or "").strip()
+    if not key:
         return _input_required([_field("api_key", "string", "Your Maneki api_key (from 'Maneki Account and Gas')")],
-                               "api_key is required. Register first with the 'Maneki Account and Gas' service.")
+                               "api_key is required. Register first with the 'Maneki Account and Gas' service "
+                               "(or use mk_demo for a read-only look).")
+    s = settings()
+    if key == s.demo_api_key and s.demo_payer:
+        acct = store.account_for_payer(s.demo_payer)
+        if acct is None:
+            return JSONResponse(status_code=503, content={"status": "error", "error": "demo account not provisioned"})
+        acct = await _resolve(acct)
+        return dict(acct, demo=True)
     acct = _account(body)
     if acct is None:
         pending = store.account_for_key(str(body.get("api_key") or ""))
@@ -379,6 +434,12 @@ async def agents_create(request: Request):
                                "Repeat the call with confirm=true to proceed.",
                     "wallet": st.get("wallet"), "symbol": sym, "persona": persona,
                     "capital_max": cap_usd, "max_leverage": cap_lev}
+    if _is_demo(acct):
+        return _demo_reply("no agent was created", {"symbol": f"xyz:{sym}", "persona": persona,
+                                                    "mode": "virtual" if not live else "live",
+                                                    "capital_max": body.get("capital_max") or s.default_capital_max,
+                                                    "max_leverage": body.get("max_leverage") or s.default_max_leverage,
+                                                    "gas_per_round": "18-88 depending on model"})
     try:
         fields: Dict[str, Any] = {
             "symbol": f"xyz:{sym}",
@@ -472,6 +533,8 @@ async def agents_control(request: Request):
         missing.append(_field("action", "string", "one of " + "|".join(ACTIONS)))
     if missing:
         return _input_required(missing, "agent_id and action (start|stop|close_position|add_ticks) are required.")
+    if _is_demo(acct):
+        return _demo_reply(f"'{action}' was not applied to agent {agent_id}", {"agent_id": agent_id, "action": action})
     payload: Dict[str, Any] = {}
     core_action = {"start": "start", "stop": "stop", "close_position": "close-position", "add_ticks": "add-ticks",
                    "update": ""}[action]
@@ -542,6 +605,11 @@ async def authorize(request: Request):
     acct = await _need_account(body)
     if isinstance(acct, JSONResponse):
         return acct
+    if _is_demo(acct):
+        return _demo_reply("no authorization link is minted", {
+            "how_it_works": ["Register to get your own api_key.", "Call this service: it returns a one-time link.",
+                             "Open it in a browser, sign in with the wallet Maneki may trade, approve the API wallet.",
+                             "Call 'Maneki Account Status' and see live_ready=true."]})
     try:
         st = await _core().link_status(acct["payer"])
         if st.get("linked") and (st.get("authorization") or {}).get("live_ready") and not body.get("force"):
@@ -577,6 +645,9 @@ async def account(request: Request):
     out = {"status": "ok", "payer": acct["payer"], "account": _addr(acct), "gas_balance": pts.get("balance"),
            "agents": len(agents), "live_agents_enabled": settings().live_agents, **_auth_view(st),
            "dashboard_url": _dashboard("#settings")}
+    if _is_demo(acct):
+        out["demo"] = True
+        out["note"] = "This is the shared demo account. Register to get your own."
     pend = store.pending_credits(acct["payer"])
     if pend:
         out["pending_credits"] = sum(int(r["credits"]) for r in pend)
@@ -714,6 +785,13 @@ async def report_get(request: Request):
     if not oid:
         return _input_required([_field("order_id", "string", "the order id returned by Maneki Research Report")],
                                "order_id is required.")
+    if oid == "ord_demo" and settings().demo_payer:
+        sample = next((x for x in store.orders_for(settings().demo_payer, limit=20) if x["status"] == "delivered"), None)
+        if sample is None:
+            return {"status": "demo", "demo": True, "message": "No sample report has been generated yet."}
+        view = _order_view(sample)
+        view["demo"] = True
+        return view
     o = store.get_order(oid)
     if not o:
         return JSONResponse(status_code=404, content={"status": "error", "error": "unknown order_id"})

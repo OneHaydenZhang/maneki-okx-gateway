@@ -26,9 +26,14 @@ def _curl(path: str, body: Dict[str, Any]) -> str:
             f"-d '{json.dumps(body, separators=(',', ':'))}'")
 
 
+ERRORS = ("Errors: missing or invalid parameters return HTTP 400 with status=input_required and a fields list "
+          "(never after payment); other failures return status=error with a readable message. "
+          "api_key mk_demo tries the service read-only.")
+
+
 def _desc(summary: str, params: str, path: str, example: Dict[str, Any]) -> str:
     return "\n".join([
-        f"1. [Service Description] {summary}",
+        f"1. [Service Description] {summary} {ERRORS}",
         f"2. [Parameter Spec] {params}",
         "3. [Request Method] POST",
         f"4. [Request Example] {_curl(path, example)}",
@@ -60,9 +65,9 @@ def services() -> List[Dict[str, Any]]:
             "serviceDescription": _desc(
                 "Structured analysis of a Hyperliquid US-stock perp (xyz dex): headline, key points, trade idea with "
                 "side, size, leverage, stop and take-profit, and confidence. Costs 8 Agent Gas from your Maneki balance.",
-                "api_key(string, required): from Maneki Account and Gas; symbol(string, required): ticker such as NVDA, "
+                "api_key(string, required): from Maneki Account and Gas, or mk_demo; symbol(string, required): ticker such as NVDA, "
                 "TSLA, AAPL; question(string, optional): what you want to know",
-                "/okx/v1/analyze", {"api_key": "mk_...", "symbol": "NVDA", "question": "Is momentum still intact?"}),
+                "/okx/v1/analyze", {"api_key": "mk_demo", "symbol": "NVDA", "question": "Is momentum still intact?"}),
         },
         {
             "serviceType": "A2MCP",
@@ -78,7 +83,7 @@ def services() -> List[Dict[str, Any]]:
                 "Live Authorization + confirm=true); model(string, optional); capital_max(number, optional): USD budget, "
                 "default 200; max_leverage(integer, optional): default 3; max_ticks(integer, optional): rounds to run, "
                 "default 24; label(string, optional)",
-                "/okx/v1/agents/create", {"api_key": "mk_...", "symbol": "NVDA", "persona": "navigator", "capital_max": 200}),
+                "/okx/v1/agents/create", {"api_key": "mk_demo", "symbol": "NVDA", "persona": "navigator", "capital_max": 200}),
         },
         {
             "serviceType": "A2MCP",
@@ -89,7 +94,7 @@ def services() -> List[Dict[str, Any]]:
                 "Lists your Maneki agents, or for one agent returns status, virtual equity, open position, trade "
                 "records, the latest decisions with reasoning, and Gas balance.",
                 "api_key(string, required); agent_id(string, optional): one agent's id for details",
-                "/okx/v1/agents/status", {"api_key": "mk_...", "agent_id": "ag_xxx"}),
+                "/okx/v1/agents/status", {"api_key": "mk_demo"}),
         },
         {
             "serviceType": "A2MCP",
@@ -102,7 +107,7 @@ def services() -> List[Dict[str, Any]]:
                 "close_position|add_ticks|update; ticks(integer, optional): rounds to add for add_ticks; for update: "
                 "persona, model, interval_s, max_ticks, max_leverage, capital_max, stop_loss_pct, custom_prompt, label "
                 "(any subset)",
-                "/okx/v1/agents/control", {"api_key": "mk_...", "agent_id": "ag_xxx", "action": "stop"}),
+                "/okx/v1/agents/control", {"api_key": "mk_demo", "agent_id": "ag_demo", "action": "stop"}),
         },
         {
             "serviceType": "A2MCP",
@@ -114,7 +119,7 @@ def services() -> List[Dict[str, Any]]:
                 "account Maneki may trade, sign in (gasless) and approve Maneki's API wallet. Nothing is signed by "
                 "the agent; the link is for the human. Needed only for live agents; virtual agents need no wallet.",
                 "api_key(string, required); force(boolean, optional): mint a new link even if already authorized",
-                "/okx/v1/authorize", {"api_key": "mk_..."}),
+                "/okx/v1/authorize", {"api_key": "mk_demo"}),
         },
         {
             "serviceType": "A2MCP",
@@ -125,7 +130,7 @@ def services() -> List[Dict[str, Any]]:
                 "Shows your Maneki account: Gas balance, number of agents, linked wallet and its Hyperliquid "
                 "authorization state (live_ready), and what is still missing for live trading.",
                 "api_key(string, required); fresh(boolean, optional): re-check Hyperliquid instead of the cache",
-                "/okx/v1/account", {"api_key": "mk_..."}),
+                "/okx/v1/account", {"api_key": "mk_demo"}),
         },
         {
             "serviceType": "A2MCP",
@@ -149,7 +154,7 @@ def services() -> List[Dict[str, Any]]:
                 "Fetches a paid report by order id (text, SHA-256, X Layer anchor status) — already-bought reports are "
                 "free to read again.",
                 "order_id(string, required); api_key(string, optional)",
-                "/okx/v1/report/get", {"order_id": "ord_xxx"}),
+                "/okx/v1/report/get", {"order_id": "ord_demo"}),
         },
     ]
 
