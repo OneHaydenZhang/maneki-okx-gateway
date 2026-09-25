@@ -29,7 +29,7 @@ WATCH_PROMPT = (
     "You are writing check #{seq} of {total} in a {hours}-hour monitoring brief on {symbol} perpetual (Hyperliquid xyz dex), "
     "one check every {every} hours. Focus: {focus}. Cover what changed since the previous check where relevant: "
     "price action and levels, funding and open interest, momentum/volatility, and a concrete stance (side, invalidation, "
-    "targets) with confidence. Be specific and numeric; say clearly what is uncertain."
+    "targets) with confidence. Be specific and numeric; say clearly what is uncertain. Write in English."
 )
 
 
@@ -87,8 +87,8 @@ async def run_check(w: Dict[str, Any]) -> Dict[str, Any]:
     else:
         fields["next_due"] = float(w["next_due"] or time.time()) + int(w["interval_s"])
     store.update_watch(w["watch_id"], **fields)
-    if s.anchor_key:
-        asyncio.get_running_loop().create_task(anchor_one("run", run["run_id"], sha))
+    # Anchoring is done by anchor_forever (checks the key's OKB balance first), so
+    # an unfunded key never produces a trail of failed transactions.
     return run
 
 

@@ -64,9 +64,11 @@ def services() -> List[Dict[str, Any]]:
             "endpoint": s.public_url("/okx/v1/analyze"),
             "serviceDescription": _desc(
                 "Structured analysis of a Hyperliquid US-stock perp (xyz dex): headline, key points, trade idea with "
-                "side, size, leverage, stop and take-profit, and confidence. Costs 8 Agent Gas from your Maneki balance.",
-                "api_key(string, required): from Maneki Account and Gas, or mk_demo; symbol(string, required): ticker such as NVDA, "
-                "TSLA, AAPL; question(string, optional): what you want to know",
+                "side, size, leverage, stop and take-profit, and confidence. Costs 8 Agent Gas from your Maneki balance. "
+                "If the reply is status=generating, call again with the returned analysis_id after about 10 seconds.",
+                "api_key(string, required): from Maneki Account and Gas, or mk_demo; symbol(string, required): ticker chosen "
+                "by the user such as NVDA, TSLA, AAPL; question(string, optional): what you want to know; "
+                "analysis_id(string, optional): to collect a result that was still generating",
                 "/okx/v1/analyze", {"api_key": "mk_demo", "symbol": "NVDA", "question": "Is momentum still intact?"}),
         },
         {

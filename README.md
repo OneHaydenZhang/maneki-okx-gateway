@@ -20,7 +20,7 @@ an exchange. The live-account path (route A below) is designed in [docs/LIVE_PAT
 | Service | Path | Price | Needs |
 |---|---|---|---|
 | Maneki Account and Gas | `/okx/v1/register` | $1 (x402) → 1,000 Agent Gas | — |
-| Maneki Market Analysis | `/okx/v1/analyze` | free (8 Gas) | `api_key`, `symbol` |
+| Maneki Market Analysis | `/okx/v1/analyze` | free (8 Gas) | `api_key`, `symbol` (answers within the 10 s probe budget or returns `analysis_id` to collect) |
 | Maneki Virtual Trading Agent | `/okx/v1/agents/create` | free (Gas per round) | `api_key`, `symbol`, `persona?` |
 | Maneki Agent Status | `/okx/v1/agents/status` | free | `api_key`, `agent_id?` |
 | Maneki Agent Control | `/okx/v1/agents/control` | free | `api_key`, `agent_id`, `action` |
@@ -123,6 +123,8 @@ python okx_gateway/scripts/demo_flow.py --base http://127.0.0.1:4180 --key 0x<pr
 Plays a buyer end to end with the official SDK client: 402 → signed EIP-3009
 authorization → registration → analysis → virtual agent → paid report → digest check.
 Add `--link-key 0x<another key>` to replay the human side of the live authorization (wallet login + claim).
+
+`okx_gateway/scripts/okx_market_walk.py` drives the official marketplace path with the `onchainos` CLI (service-match → task-create-prepare → a2mcp-probe → pay / confirm-free). The buyer wallet needs an OKX.AI User identity (`onchainos agent create --role user --name …`) first.
 
 From an OKX AI agent, the same thing is: *"find ManekiAI on OKX.AI and open an
 account"*, then *"create a Maneki virtual agent on NVDA"*.

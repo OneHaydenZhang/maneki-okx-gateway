@@ -20,7 +20,8 @@ SYMBOL = _p("string", "US-stock perp ticker on Hyperliquid chosen by the user (a
 INPUTS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "/okx/v1/register": {"nickname": _p("string", "display name for the account", required=False)},
     "/okx/v1/analyze": {"api_key": API_KEY, "symbol": SYMBOL,
-                        "question": _p("string", "what you want to know", required=False)},
+                        "question": _p("string", "what you want to know", required=False),
+                        "analysis_id": _p("string", "returned when status=generating; call again with it to collect", False)},
     "/okx/v1/agents/create": {"api_key": API_KEY, "symbol": SYMBOL,
                               "persona": _p("string", "conservative|balanced|navigator|aggressive|extreme", False),
                               "mode": _p("string", "virtual (default) or live", False),

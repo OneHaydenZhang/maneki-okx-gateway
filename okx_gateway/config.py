@@ -88,6 +88,9 @@ class Settings:
     default_max_ticks: int = field(default_factory=lambda: _int("OKX_DEFAULT_MAX_TICKS", 24))
     default_capital_max: float = field(default_factory=lambda: _float("OKX_DEFAULT_CAPITAL_MAX", 200.0))
     default_max_leverage: int = field(default_factory=lambda: _int("OKX_DEFAULT_MAX_LEVERAGE", 3))
+    # OKX's a2mcp probe gives an endpoint 10 s; analyses that run longer are
+    # handed back as analysis_id and finished in the background.
+    analyze_inline_budget_s: float = field(default_factory=lambda: _float("OKX_ANALYZE_INLINE_S", 8.0))
     # Report generation budget before we hand back an order id instead of the text.
     report_inline_budget_s: float = field(default_factory=lambda: _float("OKX_REPORT_INLINE_S", 20.0))
     # X Layer anchoring of report hashes (optional; off when the key is empty).

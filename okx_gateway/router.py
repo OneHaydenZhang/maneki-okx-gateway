@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -358,22 +359,20 @@ async def register(request: Request):
 
 # ---- free: analysis ------------------------------------------------------------------
 
-@router.post("/analyze")
-async def analyze(request: Request):
-    body = await _body(request)
-    acct = await _need_account(body)
-    if isinstance(acct, JSONResponse):
-        return acct
-    sym = _symbol(body.get("symbol"))
-    if not sym:
-        return _input_required([_field("symbol", "string", "US-stock perp ticker, e.g. NVDA, TSLA, AAPL")],
-                               "symbol is required (a Hyperliquid US-stock perp ticker such as NVDA).")
-    question = str(body.get("question") or "").strip()[:500]
-    message = question or f"Give me a structured market read on {sym} with a concrete trade idea."
-    try:
-        data = await _core().chat(_addr(acct), message, symbol=sym, advice=True)
-    except CoreError as e:
-        return _core_err(e)
+# In-flight and finished analyses, keyed by analysis_id. The OKX probe allows an
+# endpoint 10 s; a slow model answer keeps running here and is collected on the
+# next call. Small, process-local, expires after 15 minutes.
+_ANALYSES: Dict[str, Dict[str, Any]] = {}
+_ANALYSIS_TTL_S = 900
+
+
+def _gc_analyses() -> None:
+    cut = time.time() - _ANALYSIS_TTL_S
+    for k in [k for k, v in _ANALYSES.items() if v["ts"] < cut]:
+        _ANALYSES.pop(k, None)
+
+
+def _analysis_view(sym: str, message: str, data: Dict[str, Any], analysis_id: str = "") -> Any:
     if data.get("insufficient_credits"):
         return _err(402, (data.get("structured") or {}).get("headline") or "not enough Gas")
     st = data.get("structured") or {}
@@ -381,7 +380,7 @@ async def analyze(request: Request):
     if _chat_unusable(data):
         return {"status": "busy", "symbol": sym,
                 "message": st.get("headline") or "model busy — nothing was charged; retry in a few seconds"}
-    return {
+    out = {
         "status": "ok", "symbol": sym, "asked": message,
         "headline": st.get("headline"), "points": [_point_text(p) for p in (st.get("points") or [])],
         "analysis": st.get("analysis"),
@@ -391,6 +390,77 @@ async def analyze(request: Request):
         "gas_cost": 8, "ts": data.get("ts") or time.time(),
         "disclaimer": "Analysis, not advice. Virtual agents simulate fills; nothing here places a real order.",
     }
+    if analysis_id:
+        out["analysis_id"] = analysis_id
+    return out
+
+
+@router.post("/analyze")
+async def analyze(request: Request):
+    body = await _body(request)
+    acct = await _need_account(body)
+    if isinstance(acct, JSONResponse):
+        return acct
+    _gc_analyses()
+    # Follow-up: collect an analysis that was still generating last time.
+    aid = str(body.get("analysis_id") or "").strip()
+    if aid:
+        entry = _ANALYSES.get(aid)
+        if entry is None:
+            return JSONResponse(status_code=404, content={"status": "error", "error": "unknown or expired analysis_id"})
+        if entry.get("owner") != acct["payer"]:
+            return JSONResponse(status_code=403, content={"status": "error", "error": "analysis_id belongs to another account"})
+        task = entry.get("task")
+        if "result" not in entry and "error" not in entry and task is not None and \
+                task.get_loop() is not asyncio.get_running_loop():
+            # The worker was started on a loop that is gone (a restart, or a test
+            # client that runs each request on its own loop): redo it here.
+            try:
+                entry["result"] = await _core().chat(_addr(acct), entry["message"], symbol=entry["symbol"], advice=True)
+            except Exception as e:
+                entry["error"] = e
+        deadline = time.time() + settings().analyze_inline_budget_s
+        while "result" not in entry and "error" not in entry and time.time() < deadline:
+            await asyncio.sleep(0.25)   # poll: never await a task that may belong to another loop
+        if "error" in entry:
+            e = entry["error"]
+            return _core_err(e) if isinstance(e, CoreError) else _err(502, "analysis failed")
+        if "result" not in entry:
+            return {"status": "generating", "analysis_id": aid, "symbol": entry["symbol"],
+                    "message": "Still generating — call again with this analysis_id in about 10 seconds."}
+        return _analysis_view(entry["symbol"], entry["message"], entry["result"], aid)
+    sym = _symbol(body.get("symbol"))
+    if not sym:
+        return _input_required([_field("symbol", "string", "US-stock perp ticker chosen by the user, e.g. NVDA, TSLA, AAPL")],
+                               "symbol is required: ask the user which Hyperliquid US-stock perp ticker they want.",
+                               "/okx/v1/analyze")
+    question = str(body.get("question") or "").strip()[:500]
+    message = question or f"Give me a structured market read on {sym} with a concrete trade idea."
+    aid = "ana_" + secrets.token_hex(5)
+    entry: Dict[str, Any] = {"owner": acct["payer"], "symbol": sym, "message": message, "ts": time.time()}
+    _ANALYSES[aid] = entry
+    address = _addr(acct)
+
+    async def work() -> None:
+        try:
+            entry["result"] = await _core().chat(address, message, symbol=sym, advice=True)
+        except Exception as e:   # recorded, collected on the follow-up call
+            entry["error"] = e
+
+    task = asyncio.get_running_loop().create_task(work())
+    entry["task"] = task
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=settings().analyze_inline_budget_s)
+    except asyncio.TimeoutError:
+        return {"status": "generating", "analysis_id": aid, "symbol": sym,
+                "message": "The analysis is being generated (the model needs a few more seconds). Call 'Maneki Market "
+                           "Analysis' again with this analysis_id (and the same api_key) in about 10 seconds to get it."}
+    if "error" in entry:
+        e = entry["error"]
+        return _core_err(e) if isinstance(e, CoreError) else _err(502, "analysis failed")
+    return _analysis_view(sym, message, entry["result"], aid)
+
+
 
 
 # ---- free: agents ---------------------------------------------------------------------
@@ -673,7 +743,7 @@ REPORT_PROMPT = (
     "Focus: {focus}. Cover: 1) market structure and recent price action, 2) funding and open interest read, "
     "3) momentum/volatility regime, 4) bull and bear scenarios with levels, 5) a concrete plan: side, entry zone, "
     "invalidation, targets, position sizing at modest leverage, 6) key risks and what would change the view. "
-    "Be specific and numeric where the data allows; say clearly what is uncertain."
+    "Be specific and numeric where the data allows; say clearly what is uncertain. Write in English."
 )
 
 
@@ -722,8 +792,7 @@ async def _generate_report(order: Dict[str, Any], address: str) -> Dict[str, Any
     sha = xlayer_anchor.digest(md)
     order = store.update_order(oid, status="delivered", report_md=md, sha256=sha, delivered_at=time.time(),
                                anchor_status="pending" if settings().anchor_key else "skipped") or order
-    if settings().anchor_key:
-        asyncio.get_running_loop().create_task(watch.anchor_one("order", oid, sha))
+    # Anchored by the background loop (watch.anchor_forever) once the key holds OKB.
     return order
 
 
