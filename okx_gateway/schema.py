@@ -15,7 +15,7 @@ def _p(typ: str, desc: str, required: bool = True) -> Dict[str, Any]:
 
 
 API_KEY = _p("string", "Your Maneki api_key from 'Maneki Account and Gas' (mk_demo = read-only demo)")
-SYMBOL = _p("string", "US-stock perp ticker on Hyperliquid, e.g. NVDA, TSLA, AAPL")
+SYMBOL = _p("string", "US-stock perp ticker on Hyperliquid chosen by the user (ask them; do not assume the example), e.g. NVDA, TSLA, AAPL")
 
 INPUTS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "/okx/v1/register": {"nickname": _p("string", "display name for the account", required=False)},
@@ -38,6 +38,10 @@ INPUTS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "/okx/v1/account": {"api_key": API_KEY, "fresh": _p("boolean", "re-check Hyperliquid", False)},
     "/okx/v1/report": {"symbol": SYMBOL, "focus": _p("string", "the question the report should answer", False),
                        "api_key": _p("string", "link the order to your account", False)},
+    "/okx/v1/watch": {"symbol": SYMBOL, "focus": _p("string", "what each report should focus on", False),
+                      "api_key": _p("string", "link the watch to your account", False)},
+    "/okx/v1/watch/get": {"watch_id": _p("string", "watch id from Maneki Watch (wat_demo = sample)"),
+                          "api_key": _p("string", "optional", False)},
     "/okx/v1/report/get": {"order_id": _p("string", "order id from Maneki Research Report (ord_demo = sample)"),
                            "api_key": _p("string", "optional", False)},
 }

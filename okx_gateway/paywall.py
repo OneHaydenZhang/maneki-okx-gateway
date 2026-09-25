@@ -8,6 +8,7 @@ Both are idempotent on the settlement tx hash.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict
 
 from fastapi import FastAPI
@@ -24,6 +25,7 @@ from .facilitator import build_facilitator, payer_of, nonce_of
 
 REGISTER_PATH = "/okx/v1/register"
 REPORT_PATH = "/okx/v1/report"
+WATCH_PATH = "/okx/v1/watch"
 
 
 def _price(s: Settings, usd: float) -> Any:
@@ -61,6 +63,17 @@ def routes_config(s: Settings) -> Dict[str, RouteConfig]:
             unpaid_response_body=_unpaid("payment_required",
                                          f"Pay ${s.price_register_usd:g} on X Layer to open/top up a ManekiAI account "
                                          f"and receive {int(round(s.price_register_usd * 1000))} Agent Gas.", REGISTER_PATH)),
+        f"POST {WATCH_PATH}": RouteConfig(
+            accepts=[PaymentOption(scheme="exact", pay_to=s.pay_to, price=_price(s, s.price_watch_usd),
+                                   network=s.network, **common)],
+            resource=s.public_url(WATCH_PATH),
+            description=f"ManekiAI Watch: {s.watch_checks} reports over {s.watch_hours}h, one every "
+                        f"{s.watch_interval_s // 3600}h, each anchored on X Layer",
+            mime_type="application/json",
+            unpaid_response_body=_unpaid("payment_required",
+                                         f"Pay ${s.price_watch_usd:g} on X Layer for a {s.watch_hours}h watch on one "
+                                         f"ticker ({s.watch_checks} reports, one every {s.watch_interval_s // 3600}h); "
+                                         "body needs symbol (and optional focus).", WATCH_PATH)),
         f"POST {REPORT_PATH}": RouteConfig(
             accepts=[PaymentOption(scheme="exact", pay_to=s.pay_to, price=_price(s, s.price_report_usd),
                                    network=s.network, **common)],
@@ -147,6 +160,11 @@ async def on_settled(payload: Any, requirements: Any, res: Any) -> None:
         return
     if not store.record_settlement(tx, payer, url, usd):
         return   # replayed receipt
+    if url.endswith(WATCH_PATH) or WATCH_PATH in url:
+        w = store.latest_pending_watch(payer)
+        if w is not None:
+            store.update_watch(w["watch_id"], status="active", txhash=tx, next_due=time.time())
+        return
     if url.endswith(REPORT_PATH) or REPORT_PATH in url:
         o = store.latest_pending_order(payer, "report")
         if o is None:
@@ -167,7 +185,7 @@ class ParamPrecheck:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") not in (REPORT_PATH, REGISTER_PATH):
+        if scope["type"] != "http" or scope.get("method") != "POST" or scope.get("path") not in (REPORT_PATH, REGISTER_PATH, WATCH_PATH):
             return await self.app(scope, receive, send)
         chunks = []
         while True:

@@ -49,6 +49,39 @@ CREATE TABLE IF NOT EXISTS orders(
   delivered_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_orders_payer ON orders(payer, created_at);
+CREATE TABLE IF NOT EXISTS watches(
+  watch_id     TEXT PRIMARY KEY,
+  payer        TEXT NOT NULL,
+  address      TEXT NOT NULL,                 -- Maneki account that generates the reports
+  symbol       TEXT NOT NULL,
+  focus        TEXT DEFAULT '',
+  interval_s   INTEGER NOT NULL,
+  checks_total INTEGER NOT NULL,
+  checks_done  INTEGER DEFAULT 0,
+  status       TEXT NOT NULL DEFAULT 'pending_payment', -- pending_payment | active | completed | stopped | failed
+  usd          REAL DEFAULT 0,
+  txhash       TEXT DEFAULT '',
+  next_due     REAL,
+  fails        INTEGER DEFAULT 0,
+  error        TEXT DEFAULT '',
+  created_at   REAL NOT NULL,
+  updated_at   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_watches_due ON watches(status, next_due);
+CREATE TABLE IF NOT EXISTS watch_runs(
+  run_id       TEXT PRIMARY KEY,
+  watch_id     TEXT NOT NULL,
+  seq          INTEGER NOT NULL,
+  ts           REAL NOT NULL,
+  status       TEXT NOT NULL,                 -- delivered | failed
+  headline     TEXT DEFAULT '',
+  report_md    TEXT DEFAULT '',
+  sha256       TEXT DEFAULT '',
+  anchor_tx    TEXT DEFAULT '',
+  anchor_status TEXT DEFAULT '',
+  error        TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_watch_runs ON watch_runs(watch_id, seq);
 CREATE TABLE IF NOT EXISTS settlements(
   txhash   TEXT PRIMARY KEY,
   payer    TEXT NOT NULL,
@@ -227,3 +260,97 @@ def reset_for_tests() -> None:
         if _CONN is not None:
             _CONN.close()
         _CONN, _PATH = None, None
+
+
+# ---- watches -------------------------------------------------------------------
+
+def create_watch(payer: str, address: str, symbol: str, focus: str, interval_s: int, checks_total: int,
+                 usd: float) -> Dict[str, Any]:
+    wid = "wat_" + secrets.token_hex(6)
+    now = time.time()
+    with _LOCK:
+        c = _conn()
+        c.execute("INSERT INTO watches(watch_id, payer, address, symbol, focus, interval_s, checks_total, status, usd, "
+                  "next_due, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (wid, payer.lower(), address.lower(), symbol, focus, int(interval_s), int(checks_total),
+                   "pending_payment", float(usd), now, now, now))
+        c.commit()
+        return dict(c.execute("SELECT * FROM watches WHERE watch_id=?", (wid,)).fetchone())
+
+
+def get_watch(watch_id: str) -> Optional[Dict[str, Any]]:
+    with _LOCK:
+        return _row(_conn().execute("SELECT * FROM watches WHERE watch_id=?", (watch_id,)).fetchone())
+
+
+def update_watch(watch_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
+    fields["updated_at"] = time.time()
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with _LOCK:
+        c = _conn()
+        c.execute(f"UPDATE watches SET {cols} WHERE watch_id=?", (*fields.values(), watch_id))
+        c.commit()
+        return _row(c.execute("SELECT * FROM watches WHERE watch_id=?", (watch_id,)).fetchone())
+
+
+def latest_pending_watch(payer: str) -> Optional[Dict[str, Any]]:
+    with _LOCK:
+        return _row(_conn().execute("SELECT * FROM watches WHERE payer=? AND status='pending_payment' "
+                                    "ORDER BY created_at DESC LIMIT 1", (payer.lower(),)).fetchone())
+
+
+def watches_for(payer: str, limit: int = 20) -> List[Dict[str, Any]]:
+    with _LOCK:
+        rows = _conn().execute("SELECT * FROM watches WHERE payer=? ORDER BY created_at DESC LIMIT ?",
+                               (payer.lower(), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+
+def due_watches(now: float, limit: int = 3) -> List[Dict[str, Any]]:
+    with _LOCK:
+        rows = _conn().execute("SELECT * FROM watches WHERE status='active' AND next_due<=? "
+                               "ORDER BY next_due LIMIT ?", (now, int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_watch_run(watch_id: str, seq: int, status: str, headline: str = "", report_md: str = "",
+                  sha256: str = "", anchor_status: str = "", error: str = "") -> Dict[str, Any]:
+    rid = "run_" + secrets.token_hex(5)
+    with _LOCK:
+        c = _conn()
+        c.execute("INSERT INTO watch_runs(run_id, watch_id, seq, ts, status, headline, report_md, sha256, "
+                  "anchor_status, error) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  (rid, watch_id, int(seq), time.time(), status, headline[:200], report_md, sha256, anchor_status, error[:300]))
+        c.commit()
+        return dict(c.execute("SELECT * FROM watch_runs WHERE run_id=?", (rid,)).fetchone())
+
+
+def update_watch_run(run_id: str, **fields: Any) -> None:
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with _LOCK:
+        c = _conn()
+        c.execute(f"UPDATE watch_runs SET {cols} WHERE run_id=?", (*fields.values(), run_id))
+        c.commit()
+
+
+def watch_runs(watch_id: str) -> List[Dict[str, Any]]:
+    with _LOCK:
+        rows = _conn().execute("SELECT * FROM watch_runs WHERE watch_id=? ORDER BY seq DESC", (watch_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---- anchoring backlog ------------------------------------------------------------
+
+def unanchored(limit: int = 5) -> List[Dict[str, Any]]:
+    """Delivered reports (orders and watch runs) whose digest is not on chain yet."""
+    with _LOCK:
+        c = _conn()
+        out = [dict(r, kind="order") for r in c.execute(
+            "SELECT order_id AS id, sha256 FROM orders WHERE status='delivered' AND sha256<>'' AND "
+            "(anchor_tx IS NULL OR anchor_tx='') AND anchor_status IN ('', 'pending', 'skipped', 'failed') "
+            "ORDER BY created_at LIMIT ?", (int(limit),)).fetchall()]
+        out += [dict(r, kind="run") for r in c.execute(
+            "SELECT run_id AS id, sha256 FROM watch_runs WHERE status='delivered' AND sha256<>'' AND "
+            "(anchor_tx IS NULL OR anchor_tx='') AND anchor_status IN ('', 'pending', 'skipped', 'failed') "
+            "ORDER BY ts LIMIT ?", (int(limit),)).fetchall()]
+        return out[:limit]

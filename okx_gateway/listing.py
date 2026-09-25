@@ -140,10 +140,35 @@ def services() -> List[Dict[str, Any]]:
             "serviceDescription": _desc(
                 "A paid deep-dive report on one US-stock perp (market structure, funding, momentum, scenarios, risk). "
                 "The report's SHA-256 is anchored on X Layer and a public verify URL is returned, so the delivered text "
-                "can be proven unchanged.",
+                "can be proven unchanged. Ask the user for the ticker first; the example symbol is only an example.",
                 "symbol(string, required): ticker; focus(string, optional): the question the report should answer; "
                 "api_key(string, optional): link the order to your Maneki account",
                 "/okx/v1/report", {"symbol": "NVDA", "focus": "Earnings week risk for a swing long"}),
+        },
+        {
+            "serviceType": "A2MCP",
+            "serviceName": "Maneki Watch",
+            "fee": f"{s.price_watch_usd:g}",
+            "endpoint": s.public_url("/okx/v1/watch"),
+            "serviceDescription": _desc(
+                f"A {s.watch_hours}-hour monitoring brief on one US-stock perp: one report every "
+                f"{s.watch_interval_s // 3600} hours ({s.watch_checks} in total) covering what changed, levels, funding, "
+                "momentum and a stance. Pay once; every report's SHA-256 is anchored on X Layer. Ask the user for the "
+                "ticker first.",
+                "symbol(string, required): ticker chosen by the user; focus(string, optional): what each report should "
+                "focus on; api_key(string, optional): link the watch to your Maneki account",
+                "/okx/v1/watch", {"symbol": "NVDA", "focus": "Swing setup and risk"}),
+        },
+        {
+            "serviceType": "A2MCP",
+            "serviceName": "Maneki Watch Reports",
+            "fee": "0",
+            "endpoint": s.public_url("/okx/v1/watch/get"),
+            "serviceDescription": _desc(
+                "Fetches a watch by id: schedule, progress and every report delivered so far (text, SHA-256, X Layer "
+                "anchor). Free to read as often as you like.",
+                "watch_id(string, required); api_key(string, optional)",
+                "/okx/v1/watch/get", {"watch_id": "wat_demo"}),
         },
         {
             "serviceType": "A2MCP",

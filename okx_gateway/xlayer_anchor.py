@@ -79,3 +79,15 @@ def read_anchor(txh: str) -> Optional[str]:
         return None
     data = str(tx.get("input") or "")
     return data[2:] if data.startswith("0x") and len(data) == 66 else None
+
+
+def anchor_balance() -> float:
+    """Native OKB balance of the anchoring account (0.0 when unconfigured or unreachable)."""
+    s = settings()
+    if not s.anchor_key:
+        return 0.0
+    try:
+        acct = Account.from_key(s.anchor_key)
+        return int(_rpc(s.rpc, "eth_getBalance", [acct.address, "latest"]), 16) / 1e18
+    except Exception:
+        return 0.0

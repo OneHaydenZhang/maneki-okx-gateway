@@ -17,6 +17,14 @@ def mount(app: FastAPI) -> None:
     for p in s.problems():
         print(f"[okx-gateway] WARNING: {p}")
     app.include_router(router)
+
+    @app.on_event("startup")
+    async def _okx_gateway_loops() -> None:
+        import asyncio
+        from . import watch
+        asyncio.create_task(watch.run_forever())
+        asyncio.create_task(watch.anchor_forever())
+
     try:
         paywall.install(app, s)
         print(f"[okx-gateway] mounted: network={s.network} pay_to={s.pay_to or '(unset)'} "

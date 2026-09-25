@@ -27,6 +27,8 @@ an exchange. The live-account path (route A below) is designed in [docs/LIVE_PAT
 | Maneki Live Authorization | `/okx/v1/authorize` | free | `api_key` |
 | Maneki Account Status | `/okx/v1/account` | free | `api_key` |
 | Maneki Research Report | `/okx/v1/report` | $0.5 (x402) | `symbol`, `focus?` |
+| Maneki Watch | `/okx/v1/watch` | $1.5 (x402) → 4 reports over 24h, one every 6h | `symbol`, `focus?` |
+| Maneki Watch Reports | `/okx/v1/watch/get` | free | `watch_id` |
 | Maneki Report Retrieval | `/okx/v1/report/get` | free | `order_id` |
 | Verify a report | `GET /okx/v1/report/{order_id}/verify` | public | — |
 
@@ -61,6 +63,10 @@ asset USD₮0, settled through OKX's facilitator with the official
 `okxweb3-app-x402` SDK. A registration payment credits Gas on the Maneki core
 **at settlement time**, idempotent on the settlement tx hash. Testnet
 (`eip155:1952`) is a one-line switch (`OKX_X402_NETWORK`).
+
+## Continuous reports (Watch)
+
+One payment schedules a 24-hour brief: a background runner generates a report every 6 hours (4 in total), each hashed and anchored on X Layer; reading them back is free. Modelled on the paid research-task lane of Maneki's Celo build.
 
 ## Report verification
 

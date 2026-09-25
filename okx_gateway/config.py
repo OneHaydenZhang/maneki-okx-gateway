@@ -77,6 +77,10 @@ class Settings:
     price_register_usd: float = field(default_factory=lambda: _float("OKX_PRICE_REGISTER_USD", 1.0))
     register_credits: int = field(default_factory=lambda: _int("OKX_REGISTER_CREDITS", 1000))
     price_report_usd: float = field(default_factory=lambda: _float("OKX_PRICE_REPORT_USD", 0.5))
+    # Watch: one payment, a report every `watch_interval_s` for `watch_hours`.
+    price_watch_usd: float = field(default_factory=lambda: _float("OKX_PRICE_WATCH_USD", 1.5))
+    watch_interval_s: int = field(default_factory=lambda: _int("OKX_WATCH_INTERVAL_S", 21600))
+    watch_hours: int = field(default_factory=lambda: _int("OKX_WATCH_HOURS", 24))
     # Default shape of an agent created from OKX AI (all overridable per call).
     default_persona: str = field(default_factory=lambda: _env("OKX_DEFAULT_PERSONA", "navigator"))
     default_model: str = field(default_factory=lambda: _env("OKX_DEFAULT_MODEL", "deepseek/deepseek-chat"))
@@ -125,6 +129,10 @@ class Settings:
     @property
     def facilitator_configured(self) -> bool:
         return bool(self.okx_api_key and self.okx_secret_key and self.okx_passphrase)
+
+    @property
+    def watch_checks(self) -> int:
+        return max(1, int(self.watch_hours * 3600 // max(60, self.watch_interval_s)))
 
     def public_url(self, path: str) -> str:
         return f"{self.public_base}{path}"

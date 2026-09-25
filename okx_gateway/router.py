@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import listing, schema, store, xlayer_anchor
+from . import listing, schema, store, watch, xlayer_anchor
 from .config import settings
 from .core_client import CoreClient, CoreError
 from .facilitator import payer_of
@@ -70,10 +70,11 @@ async def _body(request: Request) -> Dict[str, Any]:
 def precheck_paid(path: str, params: Dict[str, Any]):
     """Before the paywall: the 400 input_required a paid route would answer
     after payment, or None when the call can be delivered."""
-    if path == "/okx/v1/report" and not _symbol(params.get("symbol")):
-        return _input_required_dict(path, [_field("symbol", "string", "US-stock perp ticker, e.g. NVDA"),
+    if path in ("/okx/v1/report", "/okx/v1/watch") and not _symbol(params.get("symbol")):
+        return _input_required_dict(path, [_field("symbol", "string", "US-stock perp ticker chosen by the user, e.g. NVDA"),
                                            _field("focus", "string", "what the report should answer", required=False)],
-                                    "symbol is required (a Hyperliquid US-stock perp ticker such as NVDA).")
+                                    "symbol is required: ask the user which Hyperliquid US-stock perp ticker they want "
+                                    "(e.g. NVDA, TSLA, AAPL); do not assume one.")
     return None
 
 
@@ -284,12 +285,13 @@ async def info() -> Dict[str, Any]:
     return {
         "service": "ManekiAI x OKX AI gateway", "version": "0.1.0",
         "network": s.network, "pay_to": s.pay_to,
-        "prices_usd": {"register": s.price_register_usd, "report": s.price_report_usd},
+        "prices_usd": {"register": s.price_register_usd, "report": s.price_report_usd, "watch": s.price_watch_usd},
+        "watch": {"hours": s.watch_hours, "every_s": s.watch_interval_s, "reports": s.watch_checks},
         "register_credits": s.register_credits,
-        "paid_endpoints": ["/okx/v1/register", "/okx/v1/report"],
+        "paid_endpoints": ["/okx/v1/register", "/okx/v1/report", "/okx/v1/watch"],
         "free_endpoints": ["/okx/v1/analyze", "/okx/v1/agents/create", "/okx/v1/agents/status",
                            "/okx/v1/agents/control", "/okx/v1/authorize", "/okx/v1/account",
-                           "/okx/v1/report/get", "/okx/v1/symbols"],
+                           "/okx/v1/report/get", "/okx/v1/watch/get", "/okx/v1/symbols"],
         "live_agents_enabled": s.live_agents,
         "live_limits": {"capital_max": s.live_capital_max, "max_leverage": s.live_max_leverage},
         "listing": s.public_url("/okx/v1/listing"),
@@ -335,11 +337,20 @@ async def register(request: Request):
         "note": (f"{int(round(s.price_register_usd * 1000))} Agent Gas is credited the moment this payment settles on "
                  f"X Layer (seconds). Keep api_key: every other Maneki service needs it."),
         "next_steps": [
-            "Maneki Market Analysis: {\"api_key\": ..., \"symbol\": \"NVDA\"}",
-            "Maneki Virtual Trading Agent: {\"api_key\": ..., \"symbol\": \"NVDA\", \"persona\": \"navigator\"}",
+            "Ask the user which US-stock perp ticker they care about (see available_symbols), then call "
+            "'Maneki Market Analysis' with api_key + that symbol.",
+            "To run an agent: 'Maneki Virtual Trading Agent' with api_key + the user's symbol + persona "
+            "(conservative|balanced|navigator|aggressive|extreme).",
+            "For a one-off deep dive: 'Maneki Research Report'; for a 24h every-6h brief: 'Maneki Watch'.",
+            "Do not start any of these without the user naming the ticker.",
         ],
         "dashboard_url": _dashboard("#agent"),
     }
+    try:
+        rows = (await _core().us_stocks()).get("rows") or []
+        out["available_symbols"] = [str(r.get("symbol") or "").split(":")[-1] for r in rows][:20]
+    except CoreError:
+        pass
     if nickname:
         out["nickname"] = nickname
     return out
@@ -712,16 +723,8 @@ async def _generate_report(order: Dict[str, Any], address: str) -> Dict[str, Any
     order = store.update_order(oid, status="delivered", report_md=md, sha256=sha, delivered_at=time.time(),
                                anchor_status="pending" if settings().anchor_key else "skipped") or order
     if settings().anchor_key:
-        asyncio.get_running_loop().create_task(_anchor(oid, sha))
+        asyncio.get_running_loop().create_task(watch.anchor_one("order", oid, sha))
     return order
-
-
-async def _anchor(order_id: str, sha: str) -> None:
-    try:
-        res = await asyncio.to_thread(xlayer_anchor.anchor_hash, sha)
-        store.update_order(order_id, anchor_tx=res["tx"], anchor_status="anchored")
-    except Exception as e:
-        store.update_order(order_id, anchor_status="failed", error=f"anchor: {e!r}"[:300])
 
 
 def _order_view(o: Dict[str, Any], include_text: bool = True) -> Dict[str, Any]:
@@ -776,6 +779,50 @@ async def report(request: Request):
         view["error"] = e.message
         return view
     return _order_view(done)
+
+
+# ---- paid: watch (continuous reports) --------------------------------------------------
+
+@router.post("/watch")
+async def watch_create(request: Request):
+    s = settings()
+    payer = _payer(request)
+    if not payer:
+        return JSONResponse(status_code=503, content={"status": "error", "error": "payment layer not active on this route"})
+    body = await _body(request)
+    sym = _symbol(body.get("symbol"))
+    if not sym:
+        return _input_required([_field("symbol", "string", "US-stock perp ticker chosen by the user")], "symbol is required.",
+                               "/okx/v1/watch")
+    focus = str(body.get("focus") or "").strip()[:300]
+    acct = _account(body) if body.get("api_key") else None
+    address = _addr(acct) if acct else payer
+    w = store.create_watch(payer, address, sym, focus, s.watch_interval_s, s.watch_checks, s.price_watch_usd)
+    out = watch.view(w, with_reports=False)
+    out.update({"status": "scheduled",
+                "note": (f"First report is generated right after this payment settles, then one every "
+                         f"{s.watch_interval_s // 3600}h ({s.watch_checks} in total). Fetch them any time with "
+                         "'Maneki Watch Reports' using watch_id; every report's SHA-256 is anchored on X Layer.")})
+    return out
+
+
+@router.post("/watch/get")
+async def watch_get(request: Request):
+    body = await _body(request)
+    wid = str(body.get("watch_id") or "").strip()
+    if not wid:
+        return _input_required([_field("watch_id", "string", "the watch id returned by Maneki Watch")], "watch_id is required.",
+                               "/okx/v1/watch/get")
+    if wid == "wat_demo" and settings().demo_payer:
+        sample = next((x for x in store.watches_for(settings().demo_payer, limit=20) if x["checks_done"] > 0), None)
+        if sample is None:
+            return {"status": "demo", "demo": True, "message": "No sample watch has produced a report yet."}
+        v = watch.view(sample); v["demo"] = True
+        return v
+    w = store.get_watch(wid)
+    if not w:
+        return JSONResponse(status_code=404, content={"status": "error", "error": "unknown watch_id"})
+    return watch.view(w)
 
 
 @router.post("/report/get")
